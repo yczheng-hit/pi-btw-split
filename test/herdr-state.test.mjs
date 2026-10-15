@@ -1,0 +1,37 @@
+import { hostDir as host, hostDependencyPath } from './host.mjs';
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { EventEmitter } from 'node:events';
+import { pathToFileURL } from 'node:url';
+import path from 'node:path';
+const { createJiti }=await import(pathToFileURL(hostDependencyPath('jiti', 'lib/jiti.mjs')));
+const jiti=createJiti(import.meta.url,{fsCache:false});
+const { ExtensionRunner }=await import(pathToFileURL(path.join(host,'dist/core/extensions/runner.js')));
+const { showBtwOverlay }=await jiti.import('../extensions/btw-persistent-overlay.ts');
+process.env.HERDR_ENV='1';process.env.HERDR_PANE_ID='test';process.env.HERDR_BIN_PATH='/bin/true';
+const { default:bridge }=await jiti.import('./live-fixtures/herdr-ui-prompt-blocked.ts');
+test('persistent BTW is not blocked; actual nested/custom approvals remain visible', async()=>{
+ const events=new EventEmitter(), handlers=new Map(), reports=[];
+ bridge({events,on:(n,h)=>handlers.set(n,h)});events.on('herdr:blocked',e=>reports.push(e));
+ const runner=Object.create(ExtensionRunner.prototype);runner.uiPromptDepth=0;
+ runner.emit=async e=>handlers.get(e.type)?.(e);
+ let mounted=false,hidden=false;
+ const tui={showOverlay(){mounted=true;return {hide(){hidden=true}}}};
+ const ctx={ui:{custom:factory=>runner.withUIPrompt('custom',undefined,()=>new Promise((resolve,reject)=>{
+   Promise.resolve().then(()=>factory(tui,{}, {},resolve)).catch(reject);
+ }))}};
+ const component={render:()=>[],invalidate(){}};
+ const overlay=await showBtwOverlay(ctx,{events},()=>component,()=>({nonCapturing:true}));
+ await new Promise(r=>setImmediate(r));
+ assert.equal(mounted,true);assert.equal(runner.uiPromptDepth,0);
+ assert.equal(reports.filter(e=>e.active).length,0,'BTW bootstrap must not report blocked');
+ let end;
+ const approval=runner.withUIPrompt('custom',undefined,()=>new Promise(r=>{end=r}));
+ await new Promise(r=>setImmediate(r));
+ assert.equal(reports.at(-1)?.active,true,'real approval while BTW open must be blocked');
+ end();await approval;await new Promise(r=>setImmediate(r));assert.equal(reports.at(-1)?.active,false);
+ await assert.rejects(runner.withUIPrompt('confirm','Approval',async()=>{throw Error('cancel')}));
+ await new Promise(r=>setImmediate(r));assert.equal(reports.at(-1)?.active,false);
+ overlay.handle.hide();assert.equal(hidden,true);
+ assert.equal(reports.filter(e=>e.active).length,2);
+});

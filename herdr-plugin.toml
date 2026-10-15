@@ -1,0 +1,12 @@
+id = "local.pi-btw-light"
+name = "Pi BTW light pane"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "SDK-free terminal frontend for the parent Pi's existing BTW thread"
+platforms = ["linux"]
+
+[[panes]]
+id = "btw"
+title = "BTW"
+placement = "split"
+command = ["node", "--input-type=module", "-e", "import { pathToFileURL } from 'node:url'; await import(pathToFileURL(process.env.HERDR_PLUGIN_ROOT + '/native/frontend.mjs'))"]
