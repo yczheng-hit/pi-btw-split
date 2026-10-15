@@ -4,7 +4,7 @@
 
 一个 [pi](https://github.com/earendil-works/pi-mono) 扩展，提供 `/btw` 旁路对话：主 agent 继续工作的同时，你可以另开一个对话。在 [Herdr](https://herdr.dev) 里它显示为右侧的原生 pane；在其他环境里显示为 Pi 内部的 60/40 分屏。
 
-本项目在 [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split) 独立维护，基于 Dan Bachelder 的 MIT 授权项目 pi-btw 0.7.1。版本：`0.7.1-split.4`。历史验证覆盖 Linux 上的 Pi 1.0.4、1.2.0 和 Herdr 0.9.3；不代表对所有主机或未来版本的保证。
+本项目在 [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split) 独立维护，基于 Dan Bachelder 的 MIT 授权项目 pi-btw 0.7.1。版本：`0.7.1-split.5`。历史 Linux 验证覆盖 Pi 1.0.4、1.2.0 和 Herdr 0.9.3。原生 macOS 验证覆盖 arm64、Pi 1.2.0、Node 24.20 和 Herdr 客户端/服务端 0.9.1；这些结果不代表对所有主机或未来版本的保证。
 
 支持和问题反馈使用[本仓库的 Issues](https://github.com/yczheng-hit/pi-btw-split/issues)，更新和回滚使用本项目自身历史。下方相关项目仅用于对比和致谢，不是维护入口。
 
@@ -25,21 +25,21 @@ agent 会检查前置条件、安装扩展、在适用时注册 Herdr pane 插�
 |---|---|---|---|
 | 旁路对话显示位置 | 主会话上方居中浮层 | 新的 Herdr pane | Herdr：右侧原生 pane；其他环境：Pi 内部 60/40 分屏 |
 | 旁路对话进程 | 父 Pi 内的子会话 | 另起一个完整 Pi 进程（`herdr agent start --kind pi`） | 父 Pi 内的子会话；Herdr pane 只是一个通过本地 socket 连接的轻量 Node 前端 |
-| 是否需要 Herdr | 否 | 是（v0.7.4+） | 否；原生 pane 需要 Herdr 0.9.3+ |
+| 是否需要 Herdr | 否 | 是（v0.7.4+） | 否；原生 pane 需要 Linux 或 macOS 上的 Herdr 0.9.1+ |
 | 旁路对话拿到的上下文 | 复制整个主分支 | 父上下文的静态快照；原样复用系统提示词以命中 provider 的 prompt cache | 主会话最近 3 轮的摘录（用户消息 + 文字回答）加主会话 transcript 路径。`PI_BTW_CONTEXT=full` 复制全部 |
-| 旁路对话自动压缩 | Pi 默认 | Pi 默认 | 关闭，打开 BTW 不会先等一次压缩 |
+| 旁路对话自动压缩 | 开启（遵循你的 Pi 设置） | Pi 默认设置（以普通 Pi 进程运行） | 开启（遵循你的 Pi 设置）。精简启动避免复制完整主上下文；BTW 长对话仍会压缩 |
 | 模式 | `/btw`、`/btw:tangent`（无上下文）、`/btw:ask`（只读） | 单一模式；工具范围由配置决定（`inherit/all/read-only/none`） | 同上游 |
 | 交回主 agent | `/btw:inject`、`/btw:summarize`：作为用户消息发送，主 agent 忙时排队到 follow-up | 在旁路 pane 中 `/btw merge <prompt>`；等父会话空闲后送达 | 带标签的 `BTW → main` 消息，主 agent 忙时在下一步插入（steer）。inject 确认送达前保留线程；summarize 总结生成后立即清空线程。未送达的内容保留以便重发 |
 | 输入框辅助 | 斜杠菜单（0.8.0） | 预填问题草稿供编辑 | 实时命令提示、Tab 补全、短命令（`/ask`、`/summ`）；未知的 `/btw…` 文本不会发给模型 |
 | 其他 | SSH 工作区（0.8.0） | 持久化配置（`/btw config`），可向右/向下分屏 | pane 内复制、点击切换焦点、中文输入法光标定位（均由 Herdr 提供） |
 
-本项目的不足：它从 pi-btw 0.7.1 分出，所以上游 0.8.0 的功能（SSH 工作区、上下键斜杠菜单）没有包含。原生 pane 只支持 Linux。
+本项目的不足：它从 pi-btw 0.7.1 分出，所以上游 0.8.0 的功能（SSH 工作区、上下键斜杠菜单）没有包含。原生 pane 只支持 Linux 和 macOS；其他平台在 Herdr 内可设置 `PI_BTW_SURFACE=internal` 使用 Pi 内部分屏。
 
 ## 环境要求
 
 - Node.js 22.19 或更新
 - Pi 1.0.4 或更新（`pi --version`）
-- 可选的原生 pane：Linux 上的 Herdr 0.9.3 或更新，**以及 Herdr 官方 Pi 集成**（`herdr integration install pi`）。官方集成是外部前置条件，不属于本包，仍负责父 agent 的身份和生命周期。
+- 可选的原生 pane：Linux 或 macOS 上的 Herdr 0.9.1 或更新，**以及 Herdr 官方 Pi 集成**（`herdr integration install pi`）。官方集成是外部前置条件，不属于本包，仍负责父 agent 的身份和生命周期。
 
 ## AI agent 安装步骤
 
@@ -55,9 +55,9 @@ agent 会检查前置条件、安装扩展、在适用时注册 Herdr pane 插�
    ```
    Pi 会克隆到 `<agent-dir>/git/github.com/yczheng-hit/pi-btw-split`，其中 `<agent-dir>` 是 `$PI_CODING_AGENT_DIR`，未设置时为 `~/.pi/agent`。也可使用 `pi install /absolute/path/to/pi-btw-split`，以你的本地 checkout 作为包根目录。再运行一次 `pi list` 确认。
 
-4. **注册 Herdr pane（仅限装有 Herdr 的 Linux）。** 没有安装 `herdr` 或系统不是 Linux 时跳过。
+4. **注册 Herdr pane（仅限装有 Herdr 的 Linux 或 macOS）。** 没有安装 `herdr`，或系统既不是 Linux 也不是 macOS 时跳过。
    ```sh
-   herdr --version                  # 需要 0.9.3+
+   herdr --version                  # 需要 0.9.1+
    herdr integration install pi     # 尚未安装时，安装官方 Pi 集成
    herdr plugin list --json         # 查找插件 id "local.pi-btw-light"
    herdr plugin link "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/git/github.com/yczheng-hit/pi-btw-split"
@@ -67,7 +67,7 @@ agent 会检查前置条件、安装扩展、在适用时注册 Herdr pane 插�
    - 如果 `local.pi-btw-light` 已注册在其他路径，修改前先询问用户。不要替换不是自己创建的注册。
    - 插件根目录必须正好是已安装的包目录，否则 BTW 会拒绝打开 pane。
 
-5. **在 Herdr 里使用非 Linux 系统。** 原生 pane 只支持 Linux，所以要在用户的 shell 配置里设置 `PI_BTW_SURFACE=internal`，否则 `/btw` 会报启动错误而不是打开。不在 Herdr 里时无需设置，会自动使用 Pi 内部分屏。
+5. **在 Herdr 里使用其他平台。** 原生 pane 只支持 Linux 和 macOS，所以在其他平台上要在用户的 shell 配置里设置 `PI_BTW_SURFACE=internal`，否则 `/btw` 会报启动错误而不是打开。不在 Herdr 里时无需设置，会自动使用 Pi 内部分屏。
 
 6. **完成。** 告诉用户在每个正在运行的 Pi 会话里执行 `/reload`（或新开一个会话），然后试试 `/btw hello`。agent 无法替别人的 Pi 会话执行 `/reload`。
 
@@ -120,7 +120,8 @@ pi install git:github.com/yczheng-hit/pi-btw-split   # 或：pi install /absolut
 
 - BTW 线程保存为会话里的隐藏条目，重载后仍在，且不会进入主 agent 的上下文。未提交的草稿不会写入磁盘。
 - BTW 后端运行在父 Pi 里。父 Pi 退出时 Herdr pane 会断开；重新打开会话后线程会恢复。
-- BTW 线程超出模型上下文窗口时会报错，并提示使用 `/btw:summarize` 或 `/btw:new`。
+- BTW 长对话会按你的 Pi 设置自动压缩。`/btw:inject` 和 `/btw:summarize` 仍使用完整的 BTW 问答，而不只是压缩摘要。
+- 如果压缩后 BTW 线程仍超出模型上下文窗口，BTW 会报错，并提示使用 `/btw:summarize` 或 `/btw:new`。
 - Pi 内部分屏需要全屏模式且终端至少 120 列、14 行；更小的终端使用居中窗口。
 
 ## 配置
@@ -128,7 +129,7 @@ pi install git:github.com/yczheng-hit/pi-btw-split   # 或：pi install /absolut
 | 设置 | 作用 |
 |---|---|
 | `PI_BTW_SURFACE=internal` | 即使在 Herdr 里也始终使用 Pi 内部分屏 |
-| `PI_BTW_CONTEXT=full` | 把整个主上下文复制给 BTW（上游行为），并开启压缩 |
+| `PI_BTW_CONTEXT=full` | 把整个主上下文复制给 BTW（上游行为）。压缩仍遵循你的 Pi 设置 |
 | `PI_BTW_FOCUS_KEYS` | 逗号分隔的焦点切换键，会替换默认值 |
 | `~/.pi/agent/btw.json` | 为 `/btw` 和 `/btw:tangent` 按需启用扩展工具，例如 `{"extensions": ["npm:pi-web-access"]}`。受信任项目的 `.pi/btw.json` 会替换该列表。`/btw:ask` 不读取它 |
 
@@ -144,7 +145,7 @@ npm run typecheck
 
 这些命令使用固定的 Pi 1.2.0 开发依赖在本地运行，无需全局安装 Pi，也无需修改机器专属路径。`npm run typecheck` 使用本地类型。若要额外验证另一份已安装 Pi 的运行时兼容性，可将 `PI_HOST_DIR` 设为其 `@earendil-works/pi-coding-agent` 包目录。
 
-Live 测试（`test/live-*.mjs`）需显式设置 `PI_BTW_LIVE_TEST=1`，并要求 Linux、Herdr 0.9.3，以及通过 `herdr integration install pi` 安装的官方 Herdr Pi 集成。默认加载 `<agent-dir>/extensions/herdr-agent-state.ts`，其中 `<agent-dir>` 是 `$PI_CODING_AGENT_DIR` 或 `~/.pi/agent`；可用 `PI_HERDR_EXTENSION` 覆盖集成路径。运行前阅读各脚本选项：测试会创建 Pi 父进程和 Herdr pane/tab，real-config 模式可能加载你的个人扩展。
+Live 测试（`test/live-*.mjs`）需显式设置 `PI_BTW_LIVE_TEST=1`，并要求 Linux 或 macOS、Herdr 0.9.1 或更新，以及通过 `herdr integration install pi` 安装的官方 Herdr Pi 集成。默认加载 `<agent-dir>/extensions/herdr-agent-state.ts`，其中 `<agent-dir>` 是 `$PI_CODING_AGENT_DIR` 或 `~/.pi/agent`；可用 `PI_HERDR_EXTENSION` 覆盖集成路径。运行前阅读各脚本选项：测试会创建 Pi 父进程和 Herdr pane/tab，real-config 模式可能加载你的个人扩展。
 
 `node test/perf.mjs` 测量离线渲染 fixture，不是物理终端延迟。可选的 `PI_STICKY_EXTENSION=/absolute/path/to/sticky-last-prompt.ts` 会加载你的个人 sticky-prompt 扩展做对比；默认 fixture 不需要它。
 

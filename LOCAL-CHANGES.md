@@ -1,9 +1,9 @@
-# pi-btw-split changes (0.7.1-split.4)
+# pi-btw-split changes (0.7.1-split.5)
 
 Independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Maintenance, updates and support belong to this project; related-project links in the READMEs are comparisons and credits, not support destinations.
 Dated validations and measurements below are historical results from the configurations described, not current test counts, performance promises, or guarantees for other hosts. Current setup and development commands are in [README.md](README.md).
 
-## Native Herdr pane — current default on Linux
+## Native Herdr pane — current default on Linux and macOS
 
 In `HERDR_ENV=1`, `/btw` and `/side` open/reuse a native right-hand Herdr pane.
 The frontend imports only Node builtins and the installed pi-tui terminal/renderer modules,
@@ -34,7 +34,7 @@ Completed Markdown and wrapped transcript caches are retained.
 ### Activation / explicit rollback
 
 Install this package from your local checkout, then link its package root as `local.pi-btw-light`.
-The native pane requires Linux, Herdr 0.9.3, and the external official Herdr Pi integration
+The native pane requires Linux or macOS, Herdr 0.9.1 or newer, and the external official Herdr Pi integration
 (`herdr integration install pi`). The user runs `/reload`, then `/btw`; installing or linking
 BTW does not require restarting Pi or Herdr or changing unrelated plugins.
 
@@ -73,8 +73,9 @@ JSON messages are bounded to 1 MiB, paste to 64 KiB, terminal dimensions to 512x
 queued controls/inputs to bounded counts/bytes. Latest output frames coalesce under backpressure;
 ordered input/control messages are not silently dropped. Oversized/malformed/authentication
 failures close the connection. Heartbeats and startup timeouts produce explicit disconnects.
-This is local Linux IPC, not a sandbox against other processes running as the same user.
-Pi pi-tui submodule paths and Herdr 0.9.3 APIs are compatibility seams for future upgrades.
+This is local Unix IPC on Linux and macOS, not a sandbox against other processes running as the same user.
+The IPC root uses `/tmp` when the system temp path would make the Unix socket exceed the 100-byte path guard.
+Pi pi-tui submodule paths and Herdr APIs are compatibility seams for future upgrades; the historical Linux verification below used Herdr 0.9.3.
 
 **Pi 1.2.0 upgrade check (2026-10-14):** no code change needed. All pi-tui submodules the
 frontend imports still exist (pi-tui 1.2.0); `npm test` 23/23, typecheck against 1.2.0 types and
@@ -84,6 +85,21 @@ main) pass. 1.2.0 counts a starting run as busy and requires `deliverAs` for
 and uses `deliverAs: "followUp"` otherwise. Not automated: the main session's actual handling of
 an injected/summarized thread on 1.2.0 (idle and busy) — needs one manual check each.
 (Superseded in split.3: handoffs no longer use `sendUserMessage`; see "BTW → main handoff" below.)
+
+### Native macOS verification (2026-10-15)
+
+Native pane support now includes macOS. Verified on darwin arm64 with Pi 1.2.0, Node 24.20,
+Herdr client and server 0.9.1, using the local checkout and official Herdr Pi integration.
+Five `live-native` runs passed with separate PTYs, Chinese Unicode input/render, exactly one
+Enter submission, resize, move, manual close, and parent exit; no real model was called.
+Two `live-e2e` runs passed with an isolated real Pi parent and a local fake provider: the first
+reply rendered, and a second reply rendered after replacing the thinking session; cleanup passed.
+The intentional parent exit emitted a “Main Pi pane/session identity changed” warning while
+all assertions passed. Measured first PTY UI writes were approximately 267–400 ms and
+authenticated input readiness approximately 950–1064 ms in those runs; these are observations,
+not a latency guarantee. The IPC path guard also accounts for long macOS temporary-directory
+paths by selecting `/tmp` when the socket path would exceed 100 bytes. Historical Linux 0.9.3
+timings and test counts below remain tied to their original configuration.
 
 ### Verification / measured startup (2026-10-14)
 
@@ -251,16 +267,13 @@ content and then resets), `/btw:inject` busy. No paid/network model calls.
   compaction summaries.
 - Limits: 6000 chars per message (head and tail kept); 48000 chars in total, shrinking the
   oldest answers first.
-- The BTW child gets the user's settings with `applyOverrides({ compaction: { enabled: false } })`.
-  This is in memory only; `setAutoCompactionEnabled` would persist, so it is not used.
-- Pi 1.2.0 `_checkCompaction` returns early when compaction is disabled, including on overflow.
-  An overflow error therefore carries a hint: `/btw:summarize` or `/btw:new`.
-- `PI_BTW_CONTEXT=full` restores the whole-context copy, with compaction on.
+- split.4 disabled BTW auto-compaction in memory. split.5 removes that override (see below).
+- `PI_BTW_CONTEXT=full` restores the whole-context copy.
 
 **Validated.**
 - `npm test` 27/27:
-  - `test/context.test.mjs`: excerpt rules, the settings override with the file untouched, and
-    a real-session A/B on a small window. Lean: 1 call, ~5k chars. Full: a 107k-char request
+  - `test/context.test.mjs`: excerpt rules, the then-current settings override with the file
+    untouched, and a real-session A/B on a small window. Lean: 1 call, ~5k chars. Full: a 107k-char request
     plus compaction calls.
   - `handoff.test.mjs` updated for the summary semantics, inject unchanged.
   - The native test asserts the excerpt.
@@ -283,6 +296,28 @@ content and then resets), `/btw:inject` busy. No paid/network model calls.
     real-config busy-Esc, and `live-e2e` (isolated ×2, real config): all pass.
 
 **Rollback.** Set `PI_BTW_CONTEXT=full` to restore the whole-context copy.
+
+## Lean start, compaction kept for long BTW threads (0.7.1-split.5)
+
+**Why.** split.4 disabled compaction for every BTW child to keep startup fast. The excerpt
+already keeps a new thread far below the threshold, so the override only harmed long BTW threads:
+they failed instead of compacting.
+
+**Now.**
+- `createBtwSettingsManager` returns the user's Pi settings unchanged. Auto-compaction follows
+  them in lean and `PI_BTW_CONTEXT=full` modes, including an explicit user opt-out.
+- The BTW pane shows "compacting the BTW thread" during compaction and Pi's error if it fails.
+- Handoffs read the child session's branch, not `session.state.messages`. Compaction replaces
+  the model messages with a summary, but the branch keeps the original exchanges, so
+  `/btw:inject` and `/btw:summarize` still see every question and answer.
+- An overflow that remains after Pi's single compact-and-retry still hints `/btw:summarize` or
+  `/btw:new`.
+
+**Validated.** `test/compaction.test.mjs` uses a real BTW AgentSession and an offline provider: the
+lean first question makes no compaction call; a long thread triggers Pi auto-compaction; the next
+question includes the summary; `/btw:inject` hands back all six original exchanges without the
+main excerpt; the user settings file is unchanged. The settings test checks that lean and full
+modes inherit both enabled and disabled compaction settings.
 
 ## Historical internal split / explicit fallback
 Based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. These changes are maintained here independently; the historical implementation was written on Pi 1.0.4 and re-verified on 1.2.0.
@@ -316,7 +351,7 @@ npm run typecheck
 
 These commands use the pinned Pi 1.2.0 development dependencies and offline providers, with no network model requests. Optionally, `PI_HOST_DIR` points runtime compatibility tests at another installed `@earendil-works/pi-coding-agent` package directory.
 
-Live tests are opt-in with `PI_BTW_LIVE_TEST=1` and need Linux, Herdr 0.9.3, and the official Herdr Pi integration installed by `herdr integration install pi`. They load `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`, or `~/.pi/agent/extensions/herdr-agent-state.ts` when `PI_CODING_AGENT_DIR` is unset; `PI_HERDR_EXTENSION` overrides that path. `node test/perf.mjs` optionally compares against a personal sticky-prompt extension at `PI_STICKY_EXTENSION`.
+Live tests are opt-in with `PI_BTW_LIVE_TEST=1` and need Linux or macOS, Herdr 0.9.1 or newer, and the official Herdr Pi integration installed by `herdr integration install pi`. They load `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`, or `~/.pi/agent/extensions/herdr-agent-state.ts` when `PI_CODING_AGENT_DIR` is unset; `PI_HERDR_EXTENSION` overrides that path. `node test/perf.mjs` optionally compares against a personal sticky-prompt extension at `PI_STICKY_EXTENSION`.
 
 Internal-mode manual check after `/reload` and `/btw:ui internal`: use fullscreen and a wide terminal, `/btw`, Alt+/, wheel over each pane, select main text, resize, Alt+w twice, then Esc. Main must restore full width. Verify sticky prompt click-jump while scrolled past a wrapped prompt. Streaming Escape behavior and live terminal/IME behavior are not fully covered by the offline fixture.
 

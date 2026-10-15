@@ -76,7 +76,7 @@ test('main-session excerpt: last 3 rounds of messages and text answers only', as
   assert.equal(useFullMainContext({ PI_BTW_CONTEXT: 'full' }), true);
 });
 
-test('BTW child settings: auto-compaction off in memory, settings file untouched; full mode keeps it', async () => {
+test('BTW child settings: lean/full both inherit compaction settings without writing files', async () => {
   const { btw: { createBtwSettingsManager } } = await loadExtension();
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'btw-settings-'));
   const agentDir = path.join(dir, 'agent'); await fs.mkdir(agentDir);
@@ -87,12 +87,20 @@ test('BTW child settings: auto-compaction off in memory, settings file untouched
   try {
     delete process.env.PI_BTW_CONTEXT;
     const lean = createBtwSettingsManager(dir, agentDir);
-    assert.equal(lean.getCompactionEnabled(), false);
+    assert.equal(lean.getCompactionEnabled(), true);
     assert.equal(lean.getCompactionSettings().reserveTokens, 1234, 'Other user settings are kept');
     await lean.flush?.();
     assert.equal(await fs.readFile(settingsFile, 'utf8'), original);
     process.env.PI_BTW_CONTEXT = 'full';
     assert.equal(createBtwSettingsManager(dir, agentDir).getCompactionEnabled(), true);
+    await fs.writeFile(settingsFile, JSON.stringify({ compaction: { enabled: false } }));
+    for (const mode of ['lean', 'full']) {
+      process.env.PI_BTW_CONTEXT = mode;
+      assert.equal(createBtwSettingsManager(dir, agentDir).getCompactionEnabled(), false, 'Explicit user opt-out is respected');
+    }
+    await fs.unlink(settingsFile);
+    delete process.env.PI_BTW_CONTEXT;
+    assert.equal(createBtwSettingsManager(dir, agentDir).getCompactionEnabled(), true, 'Pi default is on');
   } finally {
     if (saved === undefined) delete process.env.PI_BTW_CONTEXT; else process.env.PI_BTW_CONTEXT = saved;
     await fs.rm(dir, { recursive: true, force: true });

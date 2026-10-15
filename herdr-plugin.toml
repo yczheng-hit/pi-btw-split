@@ -1,9 +1,9 @@
 id = "local.pi-btw-light"
 name = "Pi BTW light pane"
 version = "0.1.0"
-min_herdr_version = "0.9.3"
+min_herdr_version = "0.9.1"
 description = "SDK-free terminal frontend for the parent Pi's existing BTW thread"
-platforms = ["linux"]
+platforms = ["linux", "macos"]
 
 [[panes]]
 id = "btw"

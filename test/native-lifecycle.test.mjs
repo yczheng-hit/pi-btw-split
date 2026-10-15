@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import net from 'node:net';
 import fs from 'node:fs/promises';
-import { NativeSurface, sweepStaleDirectories } from '../native/surface.mjs';
+import { NativeSurface, sweepStaleDirectories, ipcRoot } from '../native/surface.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { createDecoder } from '../native/protocol.mjs';
@@ -85,6 +85,33 @@ test('authoritative reconciliation stops on parent session replacement without t
     assert.ok(f.calls.filter(c => c.method === 'plugin.pane.close').every(c => c.params.pane_id === 'w1:p2'));
     assert.equal(f.parent.agent_session.value, 'foreign-session');
   } finally { await f.surface.close(); }
+});
+
+test('IPC root keeps the socket path within the Unix limit', () => {
+  assert.equal(ipcRoot('/var/folders/l4/c_2n67x53fb4_mqr6ccj311m0000gn/T'), '/var/folders/l4/c_2n67x53fb4_mqr6ccj311m0000gn/T');
+  assert.equal(ipcRoot('/var/folders/' + 'x'.repeat(80) + '/T'), '/tmp');
+  assert.equal(ipcRoot('/tmp/' + '长'.repeat(40)), '/tmp', 'Limit counts bytes, not characters');
+});
+
+test('native IPC opens and authenticates with a long TMPDIR', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'btw-long-temp-'));
+  const longDir = path.join(root, 'x'.repeat(120)); await fs.mkdir(longDir);
+  const saved = process.env.TMPDIR;
+  const f = fixture();
+  try {
+    process.env.TMPDIR = longDir;
+    await f.surface.open();
+    assert.equal(path.dirname(f.surface.directory), '/tmp');
+    const capability = JSON.parse(await fs.readFile(f.surface.capabilityPath, 'utf8'));
+    assert.ok(Buffer.byteLength(capability.socket) <= 100);
+    const client = await connect(f.surface);
+    assert.equal(f.surface.closed, false);
+    await f.surface.close(); client.socket.destroy();
+    await assert.rejects(fs.stat(f.surface.directory));
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = saved;
+    await f.surface.close(); await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test('stale IPC sweep removes only aged, own, dead pi-btw directories', async () => {

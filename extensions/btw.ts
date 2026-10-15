@@ -513,14 +513,11 @@ const BTW_TOOLS_BY_MODE: Record<BtwThreadMode, readonly string[]> = {
 };
 
 /**
- * The user's settings for the BTW child, minus auto-compaction: BTW starts lean and never
- * spends a model call (or startup time) compacting. In-memory override only; settings files
- * are not written. `PI_BTW_CONTEXT=full` keeps the old behavior, compaction included.
+ * The user's settings for the BTW child, auto-compaction included. The lean start keeps a new
+ * thread far below the threshold, so compaction only runs once the BTW thread itself grows long.
  */
 export function createBtwSettingsManager(cwd: string, agentDir: string): SettingsManager {
-  const settingsManager = SettingsManager.create(cwd, agentDir);
-  if (!useFullMainContext()) settingsManager.applyOverrides({ compaction: { enabled: false } });
-  return settingsManager;
+  return SettingsManager.create(cwd, agentDir);
 }
 
 function createSyntheticAssistantMessage(text: string, sessionModel: SessionModel | null): Message {
@@ -1252,7 +1249,12 @@ function isThreadContinuationMarker(messages: Message[], index: number): boolean
 }
 
 function extractBtwHandoffThread(sessionRuntime: BtwSessionRuntime): BtwHandoffExchange[] {
-  const handoffMessages = sessionRuntime.session.state.messages.slice(sessionRuntime.sideThreadStartIndex);
+  // Compaction replaces the model's messages with a summary, but the session branch retains
+  // the original exchanges. Count message entries only so compaction entries do not shift the seed boundary.
+  const handoffMessages = sessionRuntime.session.sessionManager.getBranch()
+    .filter((entry) => entry.type === "message")
+    .map((entry) => entry.message)
+    .slice(sessionRuntime.sideThreadStartIndex);
   const threadMessages = isThreadContinuationMarker(handoffMessages as Message[], 0) ? handoffMessages.slice(2) : handoffMessages;
   const exchanges: BtwHandoffExchange[] = [];
   let currentUser = "";
@@ -2235,6 +2237,16 @@ export default function (pi: ExtensionAPI) {
 
     if (event.type === "turn_end") {
       setOverlayStatus("⏳ streaming...", ctx);
+      return;
+    }
+
+    if (event.type === "compaction_start") {
+      setOverlayStatus("⏳ compacting the BTW thread...", ctx);
+      return;
+    }
+
+    if (event.type === "compaction_end") {
+      setOverlayStatus(event.errorMessage ? `⚠ ${event.errorMessage}` : "⏳ streaming...", ctx);
       return;
     }
 
@@ -3293,9 +3305,9 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (response.stopReason === "error") {
-        // BTW never auto-compacts; a thread that outgrew the window needs a fresh start.
-        const overflowHint = !useFullMainContext() && isContextOverflow(response, model.contextWindow)
-          ? " The BTW thread no longer fits the model's context (BTW does not auto-compact). Use /btw:summarize to hand it off, or /btw:new to start over."
+        // Pi handles compaction/retry when enabled. Offer a fallback if overflow still reaches us.
+        const overflowHint = isContextOverflow(response, model.contextWindow)
+          ? " The BTW thread no longer fits the model's context. Check your Pi compaction settings, use /btw:summarize to hand it off, or /btw:new to start over."
           : "";
         throw new Error((response.errorMessage || "BTW request failed.") + overflowHint);
       }

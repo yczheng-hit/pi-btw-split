@@ -17,9 +17,17 @@ function trackDirectory(directory) {
   process.once('exit', () => { for (const dir of liveDirectories) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } });
 }
 
+// Unix socket paths are limited to 104 bytes on macOS (108 on Linux). macOS TMPDIR is
+// already long, so fall back to /tmp when <tmpdir>/pi-btw-XXXXXX/ui.sock would not fit.
+const MAX_SOCKET_PATH_BYTES = 100;
+export function ipcRoot(tmpdir = os.tmpdir()) {
+  const probe = path.join(tmpdir, 'pi-btw-XXXXXX', 'ui.sock');
+  return Buffer.byteLength(probe) <= MAX_SOCKET_PATH_BYTES ? tmpdir : '/tmp';
+}
+
 // A killed parent cannot run any hook. Sweep only our own, aged pi-btw-* directories whose
 // socket has no listener; never touch other users' or recently created directories.
-export async function sweepStaleDirectories(root = os.tmpdir(), minAgeMs = 60_000) {
+export async function sweepStaleDirectories(root = ipcRoot(), minAgeMs = 60_000) {
   const removed = [];
   for (const name of await fs.readdir(root).catch(() => [])) {
     if (!/^pi-btw-[A-Za-z0-9]{6}$/.test(name)) continue;
@@ -53,7 +61,7 @@ export class NativeSurface {
   open() { return this.opening ??= this.start(); }
   async start() {
     try {
-      this.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-btw-'));
+      this.directory = await fs.mkdtemp(path.join(ipcRoot(), 'pi-btw-'));
       trackDirectory(this.directory);
       void sweepStaleDirectories().catch(() => {});
       await fs.chmod(this.directory, 0o700);
