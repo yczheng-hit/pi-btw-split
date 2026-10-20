@@ -6,7 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hostDir, hostDependencyPath } from './host.mjs';
 
-test('lean BTW starts small, compacts a long thread, continues, and hands back all exchanges', async () => {
+test('lean BTW asks each question in a fresh child (no thread growth, no compaction) and hands back all exchanges', async () => {
   const { createJiti } = await import(pathToFileURL(hostDependencyPath('jiti', 'lib/jiti.mjs')));
   const jiti = createJiti(import.meta.url, { fsCache: false, alias: {
     '@earendil-works/pi-tui': hostDependencyPath('@earendil-works/pi-tui', 'dist/index.js'),
@@ -56,8 +56,13 @@ test('lean BTW starts small, compacts a long thread, continues, and hands back a
     assert.equal(requests.length, 1, 'Lean first question needs no compaction');
     assert.ok(requests[0].serialized.includes('main-session-excerpt'));
     for (let i = 2; i <= 6; i++) await commands.get('btw:ask').handler(`QUESTION_${i}`, ctx);
-    assert.ok(requests.some(r => r.compact), 'Long BTW thread invokes Pi auto-compaction');
-    assert.ok(requests.some(r => !r.compact && r.serialized.includes('COMPACTED_BTW_SUMMARY')), 'Later questions use compacted context');
+    assert.ok(!requests.some(r => r.compact), 'Per-question children never grow into compaction');
+    assert.equal(requests.length, 6, 'One model call per question');
+    for (let i = 2; i <= 6; i++) {
+      const request = requests[i - 1].serialized;
+      assert.ok(request.includes(`QUESTION_${i}`) && request.includes('main-session-excerpt'));
+      for (let j = 1; j < i; j++) assert.ok(!request.includes(`QUESTION_${j}"`) && !request.includes(`ANSWER_${j} `), `Question ${i} excludes exchange ${j}`);
+    }
     assert.equal(branch.filter(e => e.customType === 'btw-thread-entry').length, 6);
     await commands.get('btw:inject').handler('', ctx);
     assert.equal(handoffs.length, 1);

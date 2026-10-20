@@ -136,7 +136,7 @@ Both handoffs arrive in the main session as a labelled `BTW → main` message, n
 - `/btw:summarize` clears the BTW thread as soon as the summary exists. If the summary never arrives (for example Escape cleared the queue), BTW warns and `/btw:summarize` resends the saved summary without another model call.
 - `/btw:inject` clears the thread only after the main session receives it. If it is dropped, the thread is kept and `/btw:inject` resends it.
 
-BTW starts lean: it sees an excerpt of the main session's last 3 rounds (the user's messages and the text answers) plus the main transcript path, not tool output or older history. If the user needs older main-session details, read or grep the transcript file named in the excerpt.
+Each BTW question is answered on its own: it sees a fresh excerpt of the main session's last 3 rounds (the user's messages and the text answers) plus the main transcript path, not tool output, older history, or earlier BTW exchanges. Earlier BTW answers stay visible in the pane and are included by `/btw:inject` / `/btw:summarize`. If a follow-up builds on an earlier BTW answer, quote the needed part in the new question. If the user needs older main-session details, read or grep the transcript file named in the excerpt.
 
 ### To make BTW cheaper or faster than the main thread
 

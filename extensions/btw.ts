@@ -190,9 +190,6 @@ const BTW_SYSTEM_PROMPT = [
 const BTW_SUMMARIZE_SYSTEM_PROMPT =
   "Summarize the side conversation concisely. Preserve key decisions, plans, insights, risks, and action items. Output only the summary.";
 
-const BTW_CONTINUE_THREAD_USER_TEXT = "[The following is a separate side conversation. Continue this thread.]";
-const BTW_CONTINUE_THREAD_ASSISTANT_TEXT = "Understood, continuing our side conversation.";
-
 type SessionThinkingLevel = "off" | AiThinkingLevel;
 type BtwThreadMode = "contextual" | "tangent" | "readonly";
 type SessionModel = NonNullable<ExtensionCommandContext["model"]>;
@@ -304,7 +301,10 @@ type BtwSessionRuntime = {
   session: AgentSession;
   mode: BtwThreadMode;
   subscriptions: Set<() => void>;
-  sideThreadStartIndex: number;
+  /** Main-session leaf the seed excerpt was taken from; a moved leaf means the seed is stale. */
+  seedLeafId: string | null;
+  /** A child answers one question; the next question starts a fresh child. */
+  used: boolean;
   abortPromise?: Promise<void>;
   promptQueue: Promise<void>;
   hasExtensions: boolean;
@@ -540,12 +540,23 @@ function createSyntheticAssistantMessage(text: string, sessionModel: SessionMode
   } as Message;
 }
 
+function getMainLeafId(ctx: ExtensionCommandContext): string | null {
+  try {
+    return ctx.sessionManager.getLeafId() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Seed for one BTW question: the latest main-session excerpt (contextual/readonly) or nothing
+ * (tangent). Earlier BTW exchanges stay in the pane and handoffs, never in the model input.
+ */
 function buildBtwSeedState(
   ctx: ExtensionCommandContext,
-  thread: BtwDetails[],
   mode: BtwThreadMode,
   sessionModel: SessionModel | null,
-): { messages: Message[]; sideThreadStartIndex: number } {
+): Message[] {
   const messages: Message[] = [];
 
   if (mode === "contextual" || mode === "readonly") {
@@ -583,67 +594,7 @@ function buildBtwSeedState(
     }
   }
 
-  const sideThreadStartIndex = messages.length;
-
-  if (thread.length > 0) {
-    messages.push(
-      {
-        role: "user",
-        content: [{ type: "text", text: BTW_CONTINUE_THREAD_USER_TEXT }],
-        timestamp: Date.now(),
-      },
-      {
-        role: "assistant",
-        content: [{ type: "text", text: BTW_CONTINUE_THREAD_ASSISTANT_TEXT }],
-        provider: sessionModel?.provider ?? "unknown",
-        model: sessionModel?.id ?? "unknown",
-        api: sessionModel?.api ?? "openai-responses",
-        usage: {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 0,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-        },
-        stopReason: "stop",
-        timestamp: Date.now(),
-      },
-    );
-
-    for (const entry of thread) {
-      messages.push(
-        {
-          role: "user",
-          content: [{ type: "text", text: entry.question }],
-          timestamp: entry.timestamp,
-        },
-        {
-          role: "assistant",
-          content: [{ type: "text", text: entry.answer }],
-          provider: entry.provider,
-          model: entry.model,
-          api: entry.api || sessionModel?.api || ctx.model?.api || "openai-responses",
-          usage:
-            entry.usage ?? {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
-          stopReason: "stop",
-          timestamp: entry.timestamp,
-        },
-      );
-    }
-  }
-
-  return {
-    messages,
-    sideThreadStartIndex,
-  };
+  return messages;
 }
 
 function formatToolPreview(value: unknown): string {
@@ -1235,72 +1186,6 @@ function buildBtwMessageContent(question: string, answer: string): string {
 
 function formatThread(thread: BtwHandoffExchange[]): string {
   return thread.map((entry) => `User: ${entry.user.trim()}\nAssistant: ${entry.assistant.trim()}`).join("\n\n---\n\n");
-}
-
-function isThreadContinuationMarker(messages: Message[], index: number): boolean {
-  const userMessage = messages[index];
-  const assistantMessage = messages[index + 1];
-  return (
-    userMessage?.role === "user" &&
-    extractMessageText(userMessage) === BTW_CONTINUE_THREAD_USER_TEXT &&
-    assistantMessage?.role === "assistant" &&
-    extractMessageText(assistantMessage) === BTW_CONTINUE_THREAD_ASSISTANT_TEXT
-  );
-}
-
-function extractBtwHandoffThread(sessionRuntime: BtwSessionRuntime): BtwHandoffExchange[] {
-  // Compaction replaces the model's messages with a summary, but the session branch retains
-  // the original exchanges. Count message entries only so compaction entries do not shift the seed boundary.
-  const handoffMessages = sessionRuntime.session.sessionManager.getBranch()
-    .filter((entry) => entry.type === "message")
-    .map((entry) => entry.message)
-    .slice(sessionRuntime.sideThreadStartIndex);
-  const threadMessages = isThreadContinuationMarker(handoffMessages as Message[], 0) ? handoffMessages.slice(2) : handoffMessages;
-  const exchanges: BtwHandoffExchange[] = [];
-  let currentUser = "";
-  let currentAssistant = "";
-  let excludeCurrent = false;
-
-  const pushCurrent = () => {
-    if (!excludeCurrent && (currentUser || currentAssistant)) {
-      exchanges.push({
-        user: currentUser.trim() || "(No user prompt)",
-        assistant: currentAssistant.trim() || "(No assistant response)",
-      });
-    }
-    currentUser = "";
-    currentAssistant = "";
-    excludeCurrent = false;
-  };
-
-  for (const message of threadMessages) {
-    if (message.role !== "user" && message.role !== "assistant") {
-      continue;
-    }
-
-    if (message.role === "user") {
-      const text = extractMessageText(message).trim();
-      if (!text) {
-        continue;
-      }
-      pushCurrent();
-      currentUser = text;
-      continue;
-    }
-
-    if (message.stopReason === "aborted" || message.stopReason === "error") {
-      excludeCurrent = true;
-      continue;
-    }
-
-    const text = extractMessageText(message).trim();
-    if (text) {
-      currentAssistant = currentAssistant ? `${currentAssistant}\n\n${text}` : text;
-    }
-  }
-
-  pushCurrent();
-  return exchanges;
 }
 
 function saveVisibleBtwNote(
@@ -1915,7 +1800,7 @@ class BtwOverlayComponent extends Container implements Focusable {
   }
 
   refresh(): void {
-    this.modeTextValue = `${getOverlayTitle(this.getMode())} · hidden thread preserved`;
+    this.modeTextValue = `${getOverlayTitle(this.getMode())} · history kept · each question independent`;
     this.modeText.setText(this.modeTextValue);
     const entries = this.readTranscriptEntries();
     const exchanges = getCompletedExchangeCount(entries);
@@ -2488,7 +2373,8 @@ export default function (pi: ExtensionAPI) {
       ],
     }) : undefined;
     const sessionManager = SessionManager.inMemory(ctx.cwd);
-    const { messages: seedMessages, sideThreadStartIndex } = buildBtwSeedState(ctx, pendingThread, mode, settings.model);
+    const seedLeafId = getMainLeafId(ctx);
+    const seedMessages = buildBtwSeedState(ctx, mode, settings.model);
 
     // The session manager is the source of provider context. Seed it before
     // creating the AgentSession so its initial context includes these messages.
@@ -2556,7 +2442,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    return { session, mode, subscriptions: new Set(), sideThreadStartIndex, promptQueue: Promise.resolve(), hasExtensions };
+    return { session, mode, subscriptions: new Set(), seedLeafId, used: false, promptQueue: Promise.resolve(), hasExtensions };
   }
 
   function ensureBtwSession(ctx: ExtensionCommandContext, mode: BtwThreadMode): Promise<BtwSessionRuntime | null> {
@@ -2579,7 +2465,9 @@ export default function (pi: ExtensionAPI) {
       return null;
     }
 
-    if (activeBtwSession?.mode === mode) {
+    // Reuse only an unused child whose seed still matches the main session (e.g. one prewarmed
+    // when the pane opened). Each question otherwise gets a fresh child with the latest excerpt.
+    if (activeBtwSession?.mode === mode && !activeBtwSession.used && activeBtwSession.seedLeafId === getMainLeafId(ctx)) {
       return activeBtwSession;
     }
 
@@ -2975,7 +2863,7 @@ export default function (pi: ExtensionAPI) {
       try {
         let record = cached;
         if (!record) {
-          const { thread } = await getBtwHandoffThread(ctx);
+          const { thread } = await getBtwHandoffThread();
           const body = kind === "summary" ? await summarizeThread(ctx, thread) : formatThread(thread);
           record = createHandoffRecord(kind, body, thread.length, instructions);
         }
@@ -3285,6 +3173,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     sessionRuntime.abortPromise = undefined;
+    sessionRuntime.used = true;
     setOverlayStatus("⏳ streaming...", ctx);
     await ensureOverlay(ctx);
 
@@ -3348,7 +3237,7 @@ export default function (pi: ExtensionAPI) {
         notify(ctx, "BTW note queued to save after the current turn finishes.", "info");
         setOverlayStatus("BTW note queued to save after the current turn finishes.", ctx);
       } else {
-        setOverlayStatus("Ready for a follow-up. Hidden BTW thread updated.", ctx);
+        setOverlayStatus("Ready for a follow-up. Next question reads the latest main session.", ctx);
       }
     } catch (error) {
       if (!isCurrentGeneration()) {
@@ -3369,31 +3258,21 @@ export default function (pi: ExtensionAPI) {
     return pendingThread.map((entry) => ({ user: entry.question, assistant: entry.answer }));
   }
 
-  async function getBtwHandoffThread(
-    ctx: ExtensionCommandContext,
-  ): Promise<{ sessionRuntime: BtwSessionRuntime | null; thread: BtwHandoffExchange[] }> {
-    const pendingSubmissions = btwSubmissionQueue;
-    await pendingSubmissions;
-
-    const sessionRuntime = activeBtwSession ?? (await ensureBtwSession(ctx, pendingMode));
+  /** The handoff is the persisted thread: every completed exchange, across per-question children. */
+  async function getBtwHandoffThread(): Promise<{ thread: BtwHandoffExchange[] }> {
+    await btwSubmissionQueue;
+    const sessionRuntime = activeBtwSession;
     if (sessionRuntime) {
-      const pendingPromptTurns = sessionRuntime.promptQueue;
-      const pendingAbort = sessionRuntime.abortPromise;
-      await pendingPromptTurns;
-      await pendingAbort;
-      if (activeBtwSession !== sessionRuntime) {
-        throw new Error("BTW session closed before handoff completed.");
-      }
+      await sessionRuntime.promptQueue;
+      await sessionRuntime.abortPromise;
     }
 
-    const thread = sessionRuntime ? extractBtwHandoffThread(sessionRuntime) : [];
-    const resolvedThread = thread.length > 0 ? thread : getPendingThreadForHandoff();
-
-    if (resolvedThread.length === 0) {
+    const thread = getPendingThreadForHandoff();
+    if (thread.length === 0) {
       throw new Error("No BTW thread available for handoff.");
     }
 
-    return { sessionRuntime, thread: resolvedThread };
+    return { thread };
   }
 
   async function summarizeThread(ctx: ExtensionCommandContext, thread: BtwHandoffExchange[]): Promise<string> {

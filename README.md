@@ -26,8 +26,8 @@ The agent checks prerequisites, installs the package, registers the Herdr pane p
 | Where the side chat appears | Centered overlay over the main session | New Herdr pane | Herdr: native right-hand pane. Elsewhere: 60/40 split inside Pi |
 | Side-chat process | Sub-session inside the parent Pi | A second, full Pi process (`herdr agent start --kind pi`) | Sub-session inside the parent Pi; the Herdr pane is a small Node frontend over a local socket |
 | Needs Herdr | No | Yes (v0.7.4+) | No; Herdr 0.9.1+ on Linux or macOS for the native pane |
-| Context given to the side chat | Copy of the whole main branch | Static snapshot of the parent context; replays the exact system prompt to reuse the provider prompt cache | Excerpt of the last 3 main rounds (user messages + text answers) plus the main transcript path. `PI_BTW_CONTEXT=full` copies everything |
-| Auto-compaction in the side chat | On (follows your Pi settings) | Pi default (runs a normal Pi process) | On (follows your Pi settings). Lean startup avoids copying the full main context; long BTW threads still compact |
+| Context given to the side chat | Copy of the whole main branch | Static snapshot of the parent context; replays the exact system prompt to reuse the provider prompt cache | Each question: a fresh excerpt of the last 3 main rounds (user messages + text answers) plus the main transcript path. Earlier BTW exchanges are shown in the pane but not sent to the model. `PI_BTW_CONTEXT=full` copies the whole main context |
+| Auto-compaction in the side chat | On (follows your Pi settings) | Pi default (runs a normal Pi process) | On (follows your Pi settings). Each question starts small, so compaction is rarely needed |
 | Modes | `/btw`, `/btw:tangent` (no context), `/btw:ask` (read-only) | One mode; tools set by config (`inherit/all/read-only/none`) | Same as upstream |
 | Back to the main agent | `/btw:inject`, `/btw:summarize`: sent as a user message, queued as follow-up when busy | `/btw merge <prompt>` from the side pane; waits for the parent to settle | Labelled `BTW → main` message, steered in at the next step when busy. Inject keeps the thread until delivery; summarize clears it as soon as the summary exists. Undelivered content is kept for resend |
 | Composer help | Slash menu (0.8.0) | Draft question prefilled for editing | Live command hints, Tab completion, short forms (`/ask`, `/summ`); unknown `/btw…` text never reaches the model |
@@ -95,7 +95,7 @@ Then follow steps 4–6 above. To try it without installing: `pi -e /path/to/pi-
 
 | Command | What it does |
 |---|---|
-| `/btw [--save] <question>` (alias `/side`) | Ask in the current BTW thread. Works while the main agent is busy. `--save` also writes the exchange as a visible note in the main transcript |
+| `/btw [--save] <question>` (alias `/side`) | Ask an independent side question with the latest main context; earlier BTW stays visible but is not sent. Works while the main agent is busy. `--save` also writes the exchange as a visible note in the main transcript |
 | `/btw:new [question]` | Clear the thread and start a fresh one with main context |
 | `/btw:tangent [--save] <question>` | Thread with no main-session context |
 | `/btw:ask [--save] <question>` | Read-only thread: only `read`, `grep`, `find`, `ls` are available |
@@ -120,8 +120,8 @@ Inside the BTW composer, short forms work (`/ask`, `/new`, `/summ`), Tab complet
 
 - BTW threads are saved as hidden session entries. They survive reloads and never enter the main agent's context. An unsubmitted draft is not saved to disk.
 - The BTW backend lives in the parent Pi. If the parent exits, the Herdr pane disconnects; the thread comes back when the session is reopened.
-- Long BTW threads use Pi auto-compaction with your Pi settings. `/btw:inject` and `/btw:summarize` still use the full BTW exchanges, not only the compaction summary.
-- If compaction cannot bring a BTW thread within the model window, BTW reports the error and suggests `/btw:summarize` or `/btw:new`.
+- Every BTW question is answered by a fresh sub-session: the latest main-session excerpt (none for `/btw:tangent`) plus that question. Earlier BTW exchanges stay visible in the pane and go back with `/btw:inject` / `/btw:summarize`, but are not model input. To build on an earlier answer, quote the part you need.
+- If a single question still overflows the model window after Pi's compaction, BTW reports the error and suggests `/btw:summarize` or `/btw:new`.
 - In-Pi split mode needs fullscreen at ≥120 columns and ≥14 rows; smaller terminals get a centered window.
 
 ## Configuration

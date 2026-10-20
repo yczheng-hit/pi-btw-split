@@ -7,8 +7,8 @@ Dated validations and measurements below are historical results from the configu
 
 In `HERDR_ENV=1`, `/btw` and `/side` open/reuse a native right-hand Herdr pane.
 The frontend imports only Node builtins and the installed pi-tui terminal/renderer modules,
-not Pi SDK, extensions, auth, or models. The existing AgentSession, tools, context snapshot,
-continuous thread, model/thinking overrides, persistence, and handback stay in the parent Pi.
+not Pi SDK, extensions, auth, or models. The existing AgentSession, tools, per-question context excerpt,
+visible thread history, model/thinking overrides, persistence, and handback stay in the parent Pi.
 Completed Markdown and wrapped transcript caches are retained.
 
 - Separate PTYs: Herdr owns layout, pane-local selection/copy and click focus. The main Pi
@@ -360,6 +360,28 @@ Install this package with `pi install git:github.com/yczheng-hit/pi-btw-split` o
 
 Rollback: in the installed checkout, inspect `git status` and preserve local changes, check out an earlier commit with `git switch --detach <commit>`, and run `/reload`. Return with `git switch main` and `/reload`. For a Git install, `pi install git:github.com/yczheng-hit/pi-btw-split@<commit>` pins a version instead.
 
+
+## Independent questions: latest main context, no old BTW input (2026-10-20)
+
+**Why.** BTW reused one child session per mode. Its main-session excerpt was taken once, when the
+child was created (often when the pane opened), and every BTW answer stayed in its context. Users
+saw answers that ignored the latest main conversation and leaned on earlier BTW exchanges.
+
+**Now.**
+- Each question runs in a fresh child seeded only with the current main-session excerpt
+  (contextual/readonly) or nothing (tangent). A prewarmed child is reused only if unused and the
+  main leaf has not moved.
+- Earlier exchanges stay in `pendingThread`, hidden session entries and the pane transcript.
+  `/btw:inject` and `/btw:summarize` hand back that persisted thread, so every completed exchange
+  is included. The continuation seed and child-branch handoff extraction were removed.
+- Long BTW threads no longer accumulate in one child, so the split.5 thread-compaction path is
+  normally not reached; Pi compaction settings still apply per question.
+
+**Validated.** `test/fresh-context.test.mjs` went red before the change (second `/btw` lacked the
+newer main messages) and passes after it. `test/compaction.test.mjs` now asserts six questions make
+six small calls with no compaction and no earlier exchanges, while `/btw:inject` returns all six.
+The native test asserts the second question excludes the first exchange while the pane shows both.
+`npm test` 32/32 with `PI_HOST_DIR` set to the installed Pi 1.2.0, and `npm run typecheck` pass.
 
 ## Herdr state + rendering fix (2026-10-14)
 - `extensions/btw-persistent-overlay.ts` obtains the TUI/keybindings in a short, explicitly tagged UI bootstrap, resolves `ctx.ui.custom` immediately, and mounts an owned `tui.showOverlay`. Closing uses that overlay's own handle and component disposal. This avoids keeping Pi's nested UI-prompt depth occupied for the life of the sidebar.

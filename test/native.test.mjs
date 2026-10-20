@@ -255,6 +255,9 @@ test('real extension uses a separate authenticated surface; reuse, draft, shortc
     input('第二问'); input('\r');
     await waitFrame(lines => lines.some(line => stripTerminalSequences(line).includes('离线回答 2')));
     await waitFrame(lines => lines.some(line => stripTerminalSequences(line).includes('2 exchanges')) && lines.some(line => stripTerminalSequences(line).includes('离线回答 1')));
+    const secondContext = JSON.stringify(requests[1].context.messages);
+    assert.ok(secondContext.includes('第二问') && secondContext.includes('MAIN_SEED_ONLY'), 'Second question gets a fresh main-session excerpt');
+    assert.ok(!secondContext.includes('只读问题') && !secondContext.includes('离线回答 1'), 'Earlier BTW exchanges stay out of the model input');
     const resetsBeforeHandoff = savedEntries.filter(e => e.type === 'btw-thread-reset').length;
     input('/inj'); input('\r'); // unique partial command runs /btw:inject (user-reported /summ case)
     const handbackDeadline = Date.now() + 2000;
