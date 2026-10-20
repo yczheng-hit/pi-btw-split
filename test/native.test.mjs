@@ -3,17 +3,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import net from 'node:net';
 import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createDecoder, createSender, MAX_MESSAGE_BYTES } from '../native/protocol.mjs';
 import { OwnedPane, findSiblingSplit } from '../native/herdr.mjs';
 import { NativeSurface } from '../native/surface.mjs';
 
 const parent = { pane_id: 'w1:p1', terminal_id: 'main-term', agent: 'pi', agent_session: { value: 'session-file' } };
 function fixture() {
-  let panes = [structuredClone(parent)], opens = 0;
+  let panes = [structuredClone(parent)], opens = 0, pluginRoot = '/own/plugin';
   const calls = [];
   const api = async (method, params) => {
     calls.push({ method, params });
-    if (method === 'plugin.list') return { plugins: [{ plugin_id: 'local.pi-btw-light', plugin_root: '/own/plugin', enabled: true }] };
+    if (method === 'plugin.list') return { plugins: [{ plugin_id: 'local.pi-btw-light', plugin_root: pluginRoot, enabled: true }] };
     if (method === 'pane.list') return { panes };
     if (method === 'pane.current') return { pane: panes[0] };
     if (method === 'plugin.pane.open') { opens++; const pane = { pane_id: `w1:p${opens + 1}`, terminal_id: opens === 1 ? 'btw-term' : `btw-term-${opens}` }; panes.push(pane); return { plugin_pane: { plugin_id: 'local.pi-btw-light', entrypoint: 'btw', pane } }; }
@@ -22,7 +24,7 @@ function fixture() {
     if (method === 'plugin.pane.close') panes = panes.filter(p => p.pane_id !== params.pane_id);
     return {};
   };
-  return { api, calls, get panes() { return panes; }, get opens() { return opens; } };
+  return { api, calls, setPluginRoot(value) { pluginRoot = value; }, get panes() { return panes; }, get opens() { return opens; } };
 }
 
 test('IPC decoder handles chunks; rejects malformed and oversized messages', () => {
@@ -63,6 +65,20 @@ test('foreign plugin and parent-session mismatch fail before creating panes', as
     await assert.rejects(pane.open({}));
   }
   assert.equal(f.opens, 0);
+});
+
+test('owned pane accepts a registered plugin root reached through a symlink', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-btw-root-'));
+  const realRoot = path.join(directory, 'real');
+  const linkedRoot = path.join(directory, 'linked');
+  await fs.mkdir(realRoot);
+  await fs.symlink(realRoot, linkedRoot);
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const f = fixture();
+  f.setPluginRoot(realRoot);
+  const pane = new OwnedPane({ api: f.api, pluginRoot: linkedRoot, parentPaneId: parent.pane_id, sessionFile: 'session-file', nonce: 'symlink-root' });
+  await pane.open({});
+  assert.equal(f.opens, 1);
 });
 
 test('only the new two-leaf sibling split is eligible for 60/40', () => {

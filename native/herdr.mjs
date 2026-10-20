@@ -1,5 +1,6 @@
 import net from 'node:net';
 import path from 'node:path';
+import { realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { createDecoder } from './protocol.mjs';
 
@@ -60,7 +61,9 @@ export class OwnedPane {
     if (this.terminal) { if (await this.current()) return this.focus(); throw new Error('BTW pane no longer owned'); }
     const plugins = (await this.api('plugin.list', {})).plugins;
     const plugin = plugins.find(p => p.plugin_id === PLUGIN_ID);
-    if (!plugin || !plugin.enabled || path.resolve(plugin.plugin_root) !== path.resolve(this.pluginRoot)) throw new Error(`Register the owned BTW plugin first: herdr plugin link ${this.pluginRoot}`);
+    const registeredRoot = plugin?.enabled ? await realpath(plugin.plugin_root).catch(() => path.resolve(plugin.plugin_root)) : null;
+    const requestedRoot = await realpath(this.pluginRoot).catch(() => path.resolve(this.pluginRoot));
+    if (!plugin || !plugin.enabled || registeredRoot !== requestedRoot) throw new Error(`Register the owned BTW plugin first: herdr plugin link ${this.pluginRoot}`);
     const main = await this.parent();
     const result = await this.api('plugin.pane.open', { plugin_id: PLUGIN_ID, entrypoint: 'btw', placement: 'split', direction: 'right', target_pane_id: main.pane_id, focus: this.focusOnOpen, cwd, env });
     const owned = result.plugin_pane;
