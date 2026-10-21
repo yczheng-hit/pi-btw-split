@@ -40,40 +40,98 @@ function mainContext() {
   ];
 }
 
-test('main-session excerpt: last 3 rounds of messages and text answers only', async () => {
-  const { context: { buildMainSessionExcerpt, clipMiddle, useFullMainContext } } = await loadExtension();
-  const excerpt = buildMainSessionExcerpt(mainContext(), { sessionFile: '/sessions/main.jsonl' });
-  const text = excerpt.text;
-  assert.equal(excerpt.rounds, 3); assert.equal(excerpt.totalRounds, 5);
-  assert.ok(text.startsWith('<main-session-excerpt rounds="3" total-rounds="5">'));
-  assert.ok(text.includes('Full main-session transcript (JSONL): /sessions/main.jsonl'));
-  for (const kept of ['第三轮问题', '第三轮回答', '第四轮：只调工具', '插话：顺便看看 B', '插话回答']) assert.ok(text.includes(kept), kept);
-  for (const dropped of ['第一轮', '第二轮', 'MAIN_SYSTEM_PROMPT', 'MAIN_COMPACTION_SUMMARY', 'SECRET_THINKING', 'TOOL_OUTPUT', 'BTW_NOTE_TEXT']) {
-    assert.ok(!text.includes(dropped), dropped);
+test('main-session snapshot: task, progress, earlier rounds and summary; no hidden content', async () => {
+  const { context: { buildMainSessionSnapshot, clipMiddle, useFullMainContext } } = await loadExtension();
+  const snapshot = buildMainSessionSnapshot(mainContext(), { sessionFile: '/sessions/main.jsonl', budgetTokens: 8000 });
+  const text = snapshot.text;
+  assert.equal(snapshot.totalRounds, 4, 'A user message after tool results is a steer of that round');
+  assert.ok(text.startsWith('<main-session-snapshot ') && text.includes('main-status="idle"') && text.includes('compacted="yes"'));
+  assert.ok(text.includes('Main transcript (JSONL): /sessions/main.jsonl'));
+  // Every round fits, including the ones the old fixed "last 3 rounds" dropped, and the summary.
+  for (const kept of ['第一轮问题', '第一轮回答', '第二轮问题', '第三轮回答', '第四轮：只调工具', '插话：顺便看看 B', '插话回答', 'MAIN_COMPACTION_SUMMARY']) {
+    assert.ok(text.includes(kept), kept);
   }
-  assert.ok(text.includes('(1 tool call omitted)') && text.includes('(2 tool calls omitted)'));
-  assert.ok(text.includes('Assistant:\n(no text answer)'), 'Tools-only round');
-  assert.ok(text.length < 1500, `excerpt stays small: ${text.length}`);
+  for (const dropped of ['MAIN_SYSTEM_PROMPT', 'SECRET_THINKING', 'TOOL_OUTPUT', 'BTW_NOTE_TEXT']) assert.ok(!text.includes(dropped), dropped);
+  assert.ok(text.includes('(1 tool call)') && text.includes('read(path: b) [t3] → ok'), 'A finished round with tool calls reports them');
+  assert.ok(snapshot.tokens <= 8000);
 
-  // No session file (in-memory main session): no transcript line. No user rounds: no excerpt.
-  assert.ok(!buildMainSessionExcerpt(mainContext()).text.includes('transcript'));
-  assert.equal(buildMainSessionExcerpt([{ role: 'system', content: 'x', timestamp: 1 }]), null);
+  // No session file: says so. Nothing to show: null.
+  assert.ok(buildMainSessionSnapshot(mainContext()).text.includes('no transcript file'));
+  assert.equal(buildMainSessionSnapshot([{ role: 'system', content: 'x', timestamp: 1 }]), null);
 
   // A BTW handoff starts a round of its own.
-  const withHandoff = buildMainSessionExcerpt([...mainContext(), { role: 'custom', customType: 'btw-handoff', content: 'HANDOFF_BODY', display: true, timestamp: 1 }, assistant([{ type: 'text', text: '收到交回' }])]);
+  const withHandoff = buildMainSessionSnapshot([...mainContext(), { role: 'custom', customType: 'btw-handoff', content: 'HANDOFF_BODY', display: true, timestamp: 1 }, assistant([{ type: 'text', text: '收到交回' }])]);
   assert.ok(withHandoff.text.includes('[BTW handoff]\nHANDOFF_BODY') && withHandoff.text.includes('收到交回'));
 
-  // Limits: long messages keep head and tail; the whole excerpt has a ceiling.
-  const long = buildMainSessionExcerpt([user('HEAD' + 'a'.repeat(20000) + 'TAIL'), assistant([{ type: 'text', text: 'b'.repeat(20000) }])]);
-  assert.ok(long.text.includes('HEAD') && long.text.includes('TAIL') && long.text.includes('characters omitted'));
-  assert.ok(long.text.length < 13000);
-  const capped = buildMainSessionExcerpt(Array.from({ length: 3 }, (_, i) => [user(`U${i}` + 'u'.repeat(5000)), assistant([{ type: 'text', text: `A${i}` + 'v'.repeat(5000) }])]).flat(), { maxTotalChars: 12000 });
-  assert.ok(capped.text.length <= 12000, String(capped.text.length));
-  assert.ok(capped.text.includes('U2') && capped.text.includes('A2'), 'Newest round survives the ceiling');
   assert.equal(clipMiddle('short', 10), 'short');
-
   assert.equal(useFullMainContext({}), false);
   assert.equal(useFullMainContext({ PI_BTW_CONTEXT: 'full' }), true);
+});
+
+test('main-session snapshot: a long running task shows its recorded progress', async () => {
+  const { context: { buildMainSessionSnapshot } } = await loadExtension();
+  const call = (id, name, args) => ({ type: 'toolCall', id, name, arguments: args });
+  const failed = (id, text) => ({ ...toolResult(id, text), isError: true });
+  const messages = [
+    user('之前的问题'), assistant([{ type: 'text', text: '之前的回答' }]),
+    user('LONG_TASK_INSTRUCTION'),
+    assistant([{ type: 'text', text: 'STEP_1_PLAN' }, call('c1', 'read', { path: 'src/a.ts' })]),
+    toolResult('c1', 'OK_OUTPUT_SHOULD_NOT_APPEAR'),
+    assistant([{ type: 'text', text: 'STEP_2_FOUND_BUG' }, call('c2', 'bash', { command: 'npm test' })]),
+    failed('c2', 'TEST_FAILURE_LINE\nmore failure detail SHOULD_NOT_APPEAR'),
+    user('STEER_FOLLOW_UP'),
+    assistant([{ type: 'text', text: 'STEP_3_FIXING' }, call('c3', 'bash', { command: 'npm run build' })]),
+  ];
+  const running = buildMainSessionSnapshot(messages, { mainRunning: true, sessionFile: '/s.jsonl' });
+  const text = running.text;
+  assert.ok(text.includes('main-status="running"') && text.includes('## Current task'));
+  assert.ok(text.includes('LONG_TASK_INSTRUCTION') && text.includes('STEER_FOLLOW_UP'), 'Instruction and steer');
+  const order = ['STEP_1_PLAN', 'read(path: src/a.ts) [c1] → ok', 'STEP_2_FOUND_BUG', 'bash(command: npm test) [c2] → ERROR: TEST_FAILURE_LINE', 'STEP_3_FIXING', 'bash(command: npm run build) [c3] → waiting for result'];
+  let at = -1;
+  for (const item of order) { const next = text.indexOf(item); assert.ok(next > at, `${item} in order`); at = next; }
+  assert.ok(text.includes('3 tool calls, 1 failed, 1 without result') && text.includes('Now: still working'));
+  assert.ok(!text.includes('SHOULD_NOT_APPEAR'), 'No tool output beyond the first error line');
+  assert.ok(text.includes('之前的问题') && text.includes('之前的回答'), 'Earlier round');
+
+  // Many steps over a tight budget: the first steps and the newest progress survive.
+  const many = [user('BIG_TASK')];
+  for (let i = 1; i <= 200; i++) {
+    many.push(assistant([{ type: 'text', text: `STEP_${i}_` + '说明'.repeat(100) }, call(`k${i}`, 'bash', { command: `cmd ${i}` })]), toolResult(`k${i}`, 'x'.repeat(5000)));
+  }
+  const tight = buildMainSessionSnapshot(many, { mainRunning: true, budgetTokens: 3000 });
+  assert.ok(tight.tokens <= 3000, `${tight.tokens} tokens`);
+  assert.ok(tight.text.includes('BIG_TASK') && tight.text.includes('STEP_1_') && tight.text.includes('STEP_200_') && tight.text.includes('[k200]'));
+  assert.ok(tight.omitted.progressItems > 0 && tight.text.includes('items omitted; see the main transcript'));
+
+  // Compacted mid-turn: the request went into the summary, the later work is still shown as progress.
+  const midTurn = buildMainSessionSnapshot([
+    { role: 'compactionSummary', summary: '## Goal\nMID_TURN_GOAL', tokensBefore: 1, timestamp: 1 },
+    assistant([{ type: 'text', text: 'AFTER_COMPACTION_STEP' }, call('m1', 'bash', { command: 'make' })]),
+  ], { mainRunning: true });
+  for (const kept of ['Started before the latest compaction', 'AFTER_COMPACTION_STEP', '[m1] → waiting for result', 'MID_TURN_GOAL']) assert.ok(midTurn.text.includes(kept), kept);
+});
+
+test('main-session snapshot: existing compaction summary is trimmed by priority, never regenerated', async () => {
+  const { context: { buildMainSessionSnapshot, computeSnapshotBudgetTokens } } = await loadExtension();
+  const summary = [
+    '## Goal\nGOAL_TEXT', '## Constraints & Preferences\n' + 'c'.repeat(3000), '## Progress\n### Done\nDONE_TEXT\n### In Progress\nIN_PROGRESS_TEXT',
+    '## Blocked\nBLOCKED_TEXT', '## Key Decisions\n' + 'd'.repeat(2000), '## Next Steps\nNEXT_TEXT', '## Critical Context\n' + 'z'.repeat(40000),
+    '<read-files>\nREAD_FILE_LIST\n</read-files>', '<modified-files>\nMODIFIED_FILE_LIST\n</modified-files>',
+  ].join('\n\n');
+  const messages = [{ role: 'compactionSummary', summary, tokensBefore: 1, timestamp: 1 }];
+  for (let i = 0; i < 4; i++) messages.push(user(`AFTER_COMPACTION_${i}`), assistant([{ type: 'text', text: `AFTER_ANSWER_${i}` }]));
+  const snapshot = buildMainSessionSnapshot(messages, { budgetTokens: 3000 });
+  assert.ok(snapshot.tokens <= 3000, `${snapshot.tokens}`);
+  for (const kept of ['GOAL_TEXT', 'DONE_TEXT', 'IN_PROGRESS_TEXT', 'BLOCKED_TEXT', 'NEXT_TEXT', 'AFTER_COMPACTION_0', 'AFTER_COMPACTION_3', 'AFTER_ANSWER_3']) assert.ok(snapshot.text.includes(kept), kept);
+  for (const dropped of ['READ_FILE_LIST', 'MODIFIED_FILE_LIST']) assert.ok(!snapshot.text.includes(dropped), dropped);
+  assert.ok(snapshot.omitted.summarySections > 0 && /summary (sections omitted|trimmed to fit)/.test(snapshot.text));
+
+  // Budget: 25% of what is left, between 1.5k and 12k, never more than what is left.
+  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 1_000_000, reserveTokens: 16384, fixedTokens: 5000 }), 12000);
+  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 32000, reserveTokens: 16384, fixedTokens: 4000 }), 2404);
+  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 24000, reserveTokens: 16384, fixedTokens: 4600 }), 1016);
+  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 8000, reserveTokens: 16384 }), 500, 'No room: a minimal status snapshot');
+  assert.equal(computeSnapshotBudgetTokens({}), 8000);
 });
 
 test('BTW child settings: lean/full both inherit compaction settings without writing files', async () => {
@@ -107,14 +165,15 @@ test('BTW child settings: lean/full both inherit compaction settings without wri
   }
 });
 
-test('real BTW session: lean excerpt by default, no compaction on a near-full main session; full mode A/B', async () => {
-  const { btw: { default: extension } } = await loadExtension();
+test('real BTW session: budgeted snapshot by default, no compaction on a near-full main session; full mode A/B', async () => {
+  const { btw, context } = await loadExtension();
+  const extension = btw.default;
   const { initTheme, getThemeByName } = await import(pathToFileURL(path.join(host, 'dist/modes/interactive/theme/theme.js')));
   initTheme('dark', false);
   const { createAssistantMessageEventStream } = await import(pathToFileURL(hostDependencyPath('@earendil-works/pi-ai', 'dist/index.js')));
 
-  // Small window: the full main context (~25k tokens of tool output) would not fit.
-  const mockModel = { provider: 'btw-offline-test', id: 'fixture', name: 'Fixture', api: 'openai-completions', baseUrl: 'http://127.0.0.1:1', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 24000, maxTokens: 1024 };
+  // Small window: the full main context (~25k tokens of tool output) crosses the compaction threshold.
+  const mockModel = { provider: 'btw-offline-test', id: 'fixture', name: 'Fixture', api: 'openai-completions', baseUrl: 'http://127.0.0.1:1', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32000, maxTokens: 1024 };
   const requests = [];
   const providerConfig = { baseUrl: mockModel.baseUrl, api: mockModel.api, apiKey: 'offline-fixture', models: [{ ...mockModel }], streamSimple(model, context) {
     const serialized = JSON.stringify(context.messages) + '\n' + (context.systemPrompt ?? '');
@@ -128,18 +187,26 @@ test('real BTW session: lean excerpt by default, no compaction on a near-full ma
   } };
   const main = mainContext();
   main.splice(8, 1, toolResult('t1', 'TOOL_OUTPUT_' + 'x'.repeat(100000)));
+  // A real compaction entry with a long summary, then a task still running with many steps.
+  const longSummary = ['## Goal\nSUMMARY_GOAL', '## Progress\nSUMMARY_PROGRESS', '## Critical Context\n' + '细节'.repeat(30000)].join('\n\n');
+  const running = [user('RUNNING_TASK')];
+  for (let i = 1; i <= 60; i++) {
+    running.push(assistant([{ type: 'text', text: `RUN_STEP_${i} ` + '进展'.repeat(200) }, { type: 'toolCall', id: `r${i}`, name: 'bash', arguments: { command: `step ${i}` } }]));
+    if (i < 60) running.push(toolResult(`r${i}`, 'RUN_OUTPUT_' + 'y'.repeat(5000)));
+  }
   let parentId = null;
-  const entries = main.filter(m => m.role !== 'compactionSummary').map((message, i) => {
-    const entry = { type: 'message', id: `e${i}`, parentId, timestamp: new Date().toISOString(), message };
-    parentId = entry.id; return entry;
-  });
+  const entries = [];
+  const add = (entry) => { entries.push({ ...entry, id: `e${entries.length}`, parentId, timestamp: new Date().toISOString() }); parentId = entries.at(-1).id; };
+  for (const message of main.filter(m => m.role !== 'compactionSummary')) add({ type: 'message', message });
+  add({ type: 'compaction', summary: longSummary, firstKeptEntryId: entries.at(-2).id, tokensBefore: 100000 });
+  for (const message of running) add({ type: 'message', message });
 
   async function ask(mode) {
     const commands = new Map(), events = new Map(), notices = [];
     extension({ registerCommand: (name, value) => commands.set(name, value), registerShortcut() {}, registerMessageRenderer() {},
       on: (name, value) => events.set(name, value), events: { emit() {} }, getThinkingLevel: () => 'off',
       appendEntry() {}, sendMessage() {}, sendUserMessage() {}, getAllTools: () => [], getCommands: () => [] });
-    const ctx = { hasUI: true, mode: 'rpc', cwd: '/tmp', model: mockModel, getSystemPrompt: () => 'PARENT_PROMPT', isIdle: () => true, isProjectTrusted: () => false,
+    const ctx = { hasUI: true, mode: 'rpc', cwd: '/tmp', model: mockModel, getSystemPrompt: () => 'PARENT_PROMPT ' + 'p'.repeat(12000), isIdle: () => false, isProjectTrusted: () => false,
       sessionManager: { getBranch: () => [], getEntries: () => entries, getLeafId: () => parentId, getSessionFile: () => '/sessions/main.jsonl' },
       modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: 'offline-fixture' }), getRegisteredNativeProvider: () => undefined, getRegisteredProviderConfig: () => providerConfig, getProviderAuthStatus: () => ({ source: 'models_json_key' }), hasConfiguredAuth: () => true, find: () => mockModel },
       ui: { theme: getThemeByName('dark'), notify: (message, level) => notices.push({ message, level }), setWidget() {} } };
@@ -159,15 +226,18 @@ test('real BTW session: lean excerpt by default, no compaction on a near-full ma
   const lean = await ask('lean');
   assert.equal(lean.calls.length, 1, 'One model call: no compaction before answering');
   const request = lean.calls[0];
-  assert.ok(request.includes('main-session-excerpt') && request.includes('插话：顺便看看 B') && request.includes('旁路问题'));
+  assert.ok(request.includes('main-session-snapshot') && request.includes('main-status=\\"running\\"') && request.includes('旁路问题'));
+  for (const kept of ['SUMMARY_GOAL', 'SUMMARY_PROGRESS', 'RUNNING_TASK', 'RUN_STEP_1 ', 'RUN_STEP_60 ', '[r60] → waiting for result']) assert.ok(request.includes(kept), kept);
   assert.ok(request.includes('/sessions/main.jsonl'));
-  assert.ok(!request.includes('TOOL_OUTPUT') && !request.includes('MAIN_SYSTEM_PROMPT') && !request.includes('SECRET_THINKING'));
-  assert.ok(request.length < 20000, `lean request ${request.length} chars`);
+  assert.ok(!request.includes('TOOL_OUTPUT') && !request.includes('RUN_OUTPUT') && !request.includes('MAIN_SYSTEM_PROMPT') && !request.includes('SECRET_THINKING'));
+  const snapshotText = JSON.parse(request.slice(0, request.lastIndexOf('\n')))[0].content[0].text;
+  const budget = context.computeSnapshotBudgetTokens({ contextWindow: 32000, reserveTokens: 16384, fixedTokens: context.estimateTextTokens('PARENT_PROMPT ' + 'p'.repeat(12000)) + context.estimateTextTokens(btw.BTW_SYSTEM_PROMPT) + context.BTW_TOOL_SCHEMA_TOKENS });
+  assert.ok(context.estimateTextTokens(snapshotText) <= budget, `snapshot ${context.estimateTextTokens(snapshotText)} > ${budget}`);
   assert.ok(!lean.notices.some(n => n.level === 'error'), JSON.stringify(lean.notices));
 
   // Old behavior for comparison: the whole main context, which this window cannot hold.
   const full = await ask('full');
-  assert.ok(full.calls.some(call => call.includes('TOOL_OUTPUT')), 'Full mode copies tool output');
+  assert.ok(full.calls.some(call => call.includes('RUN_OUTPUT')), 'Full mode copies tool output');
   assert.ok(full.calls.length > 1 || full.notices.some(n => n.level === 'error'),
     `Full mode compacts or overflows: ${full.calls.length} calls, ${JSON.stringify(full.notices)}`);
   if (process.env.PI_BTW_TEST_VERBOSE) console.log(JSON.stringify({ leanCalls: lean.calls.length, leanChars: request.length, fullCalls: full.calls.length, fullChars: full.calls.map(c => c.length) }));

@@ -54,13 +54,13 @@ test('lean BTW asks each question in a fresh child (no thread growth, no compact
     await events.get('session_start')({}, ctx);
     await commands.get('btw:ask').handler('QUESTION_1', ctx);
     assert.equal(requests.length, 1, 'Lean first question needs no compaction');
-    assert.ok(requests[0].serialized.includes('main-session-excerpt'));
+    assert.ok(requests[0].serialized.includes('main-session-snapshot'));
     for (let i = 2; i <= 6; i++) await commands.get('btw:ask').handler(`QUESTION_${i}`, ctx);
     assert.ok(!requests.some(r => r.compact), 'Per-question children never grow into compaction');
     assert.equal(requests.length, 6, 'One model call per question');
     for (let i = 2; i <= 6; i++) {
       const request = requests[i - 1].serialized;
-      assert.ok(request.includes(`QUESTION_${i}`) && request.includes('main-session-excerpt'));
+      assert.ok(request.includes(`QUESTION_${i}`) && request.includes('main-session-snapshot'));
       for (let j = 1; j < i; j++) assert.ok(!request.includes(`QUESTION_${j}"`) && !request.includes(`ANSWER_${j} `), `Question ${i} excludes exchange ${j}`);
     }
     assert.equal(branch.filter(e => e.customType === 'btw-thread-entry').length, 6);

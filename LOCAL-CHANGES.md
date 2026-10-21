@@ -1,4 +1,4 @@
-# pi-btw-split changes (0.7.1-split.5)
+# pi-btw-split changes (0.7.1-split.6)
 
 Independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Maintenance, updates and support belong to this project; related-project links in the READMEs are comparisons and credits, not support destinations.
 Dated validations and measurements below are historical results from the configurations described, not current test counts, performance promises, or guarantees for other hosts. Current setup and development commands are in [README.md](README.md).
@@ -7,7 +7,7 @@ Dated validations and measurements below are historical results from the configu
 
 In `HERDR_ENV=1`, `/btw` and `/side` open/reuse a native right-hand Herdr pane.
 The frontend imports only Node builtins and the installed pi-tui terminal/renderer modules,
-not Pi SDK, extensions, auth, or models. The existing AgentSession, tools, per-question context excerpt,
+not Pi SDK, extensions, auth, or models. The existing AgentSession, tools, per-question context snapshot,
 visible thread history, model/thinking overrides, persistence, and handback stay in the parent Pi.
 Completed Markdown and wrapped transcript caches are retained.
 
@@ -360,6 +360,38 @@ Install this package with `pi install git:github.com/yczheng-hit/pi-btw-split` o
 
 Rollback: in the installed checkout, inspect `git status` and preserve local changes, check out an earlier commit with `git switch --detach <commit>`, and run `/reload`. Return with `git switch main` and `/reload`. For a Git install, `pi install git:github.com/yczheng-hit/pi-btw-split@<commit>` pins a version instead.
 
+
+## Budgeted main-session snapshot (2026-10-21)
+
+**Why.** The split.5 excerpt kept only the last 3 rounds of user text and assistant text. It left out
+the compaction summary and all tool activity, so after a compaction, or during a long tool-heavy
+turn, BTW could not tell what the main session was doing.
+
+**Now.** Each contextual/readonly question is seeded with one `<main-session-snapshot>` built from the
+current main branch. No model call, no summarization; the existing compaction summary is reused as is.
+- Header: generation time, `main-status` running/idle, compacted yes/no, JSONL path, omitted counts.
+- Current (or latest) task: the instruction or BTW handoff plus steers. Work after a mid-turn
+  compaction is shown as a continued task.
+- Progress: assistant text and `#n tool(args) [toolCallId] → ok | ERROR: first line | waiting for result`.
+  Normal tool output, thinking and system prompts are left out.
+- Earlier rounds since the compaction, then the compaction summary trimmed by priority
+  (Goal, Progress, Blocked, Next Steps, Decisions, Constraints, Critical Context; file lists first to go).
+- Budget: `min(25% × free, 12k)` tokens, at least 1.5k but never more than free, 500 when nothing is
+  free, 8k when the window is unknown. Free = window − Pi compaction reserve − system prompt and
+  BTW prompt − 4k tool schemas − 2k question. Shares: task 15%, progress 35%, rounds 20%, summary 30%;
+  unused shares move to the others. Tokens are estimated as ASCII/4 + 1 per other character.
+- A prewarmed child is reused only if unused and the main leaf and main idle state are unchanged.
+- The BTW prompt says the snapshot is partial and to search the transcript before saying something
+  is missing. `PI_BTW_CONTEXT=full` still copies the whole context for debugging.
+
+**Validated.** `test/context.test.mjs` covers the snapshot rules, a running task with ok/error/pending
+calls and no tool output, a 200-step task under a 3k budget, mid-turn compaction, summary trimming and
+the budget formula. The real-extension test (32k window, long summary, running 60-step task, 100k tool
+output) makes exactly one model call with the snapshot inside its budget; full mode compacts.
+`test/fresh-context.test.mjs` covers refresh when the main state goes idle → running, `/btw:tangent`
+without a snapshot, `/btw:inject`, and no writes to the main session. An offline replay of a real
+session (about 80 tool calls after a mid-turn compaction) stayed within the 12k and 1.5k budgets.
+`npm test` 34/34 with `PI_HOST_DIR` set to the installed Pi 1.2.0, and `npm run typecheck` pass.
 
 ## Independent questions: latest main context, no old BTW input (2026-10-20)
 

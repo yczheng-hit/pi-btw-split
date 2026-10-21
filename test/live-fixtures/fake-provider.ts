@@ -31,7 +31,7 @@ export default function (pi: ExtensionAPI) {
           // Pi 1.2 carries the system prompt as a leading system message; match only that, not history.
           summarization: [context.systemPrompt ?? "", ...(context.messages ?? []).filter((m: any) => m.role === "system").map((m: any) => JSON.stringify(m.content ?? ""))]
             .some((text) => text.includes("You are a context summarization assistant")),
-          excerpt: JSON.stringify(users[0]?.content ?? "").includes("<main-session-excerpt"),
+          snapshot: JSON.stringify(users[0]?.content ?? "").includes("<main-session-snapshot"),
           probe: last.includes("CONTEXT_PROBE"),
           messages: (context.messages ?? []).length,
           systemHead: (context.systemPrompt ?? "").slice(0, 48),

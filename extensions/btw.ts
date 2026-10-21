@@ -44,7 +44,14 @@ import {
 } from "@earendil-works/pi-tui";
 import { loadBtwExtensionResources, readBtwExtensionSources } from "./btw-extension-tools";
 import { createBtwSplitLayout } from "./btw-split-layout";
-import { BTW_EXCERPT_ACK_TEXT, buildMainSessionExcerpt, useFullMainContext } from "./btw-context";
+import {
+  BTW_SNAPSHOT_ACK_TEXT,
+  BTW_TOOL_SCHEMA_TOKENS,
+  buildMainSessionSnapshot,
+  computeSnapshotBudgetTokens,
+  estimateTextTokens,
+  useFullMainContext,
+} from "./btw-context";
 import { getBtwUiResources, showBtwOverlay } from "./btw-persistent-overlay";
 import { NativeSurface } from "../native/surface.mjs";
 import { fileURLToPath } from "node:url";
@@ -179,9 +186,10 @@ function matchesBtwWidthToggle(data: string): boolean {
 
 type BtwOverlayWidthMode = "window" | "full";
 
-const BTW_SYSTEM_PROMPT = [
+export const BTW_SYSTEM_PROMPT = [
   "You are having an aside conversation with the user, separate from their main working session.",
   "If main session messages are provided, they are for context only — that work is being handled by another agent.",
+  "A <main-session-snapshot> is a budgeted, partial view taken when this question was asked, not the full record: when something you need is missing (tool output, older history, omitted items), read or search the main transcript file it names before saying the main session has no such information.",
   "If no main session messages are provided, treat this as a fully contextless tangent thread and rely only on the user's words plus your general instructions.",
   "Focus on answering the user's side questions, helping them think through ideas, or planning next steps.",
   "Do not act as if you need to continue unfinished work from the main session unless the user explicitly asks you to prepare something for injection back to it.",
@@ -301,8 +309,9 @@ type BtwSessionRuntime = {
   session: AgentSession;
   mode: BtwThreadMode;
   subscriptions: Set<() => void>;
-  /** Main-session leaf the seed excerpt was taken from; a moved leaf means the seed is stale. */
+  /** Main-session leaf and run state the seed snapshot was taken from; a change means the seed is stale. */
   seedLeafId: string | null;
+  seedMainIdle: boolean;
   /** A child answers one question; the next question starts a fresh child. */
   used: boolean;
   abortPromise?: Promise<void>;
@@ -548,8 +557,33 @@ function getMainLeafId(ctx: ExtensionCommandContext): string | null {
   }
 }
 
+function isMainIdle(ctx: ExtensionCommandContext): boolean {
+  try {
+    return ctx.isIdle();
+  } catch {
+    return true;
+  }
+}
+
+/** Snapshot budget for the BTW model: its window minus Pi's compaction reserve and the fixed prompt. */
+function getSnapshotBudgetTokens(ctx: ExtensionCommandContext, sessionModel: SessionModel | null): number {
+  let reserveTokens = 16384;
+  try {
+    if (sessionModel) reserveTokens = createBtwSettingsManager(ctx.cwd, getAgentDir()).getCompactionReserveTokens(sessionModel);
+  } catch {}
+  let systemPrompt = "";
+  try {
+    systemPrompt = ctx.getSystemPrompt();
+  } catch {}
+  return computeSnapshotBudgetTokens({
+    contextWindow: sessionModel?.contextWindow,
+    reserveTokens,
+    fixedTokens: estimateTextTokens(systemPrompt) + estimateTextTokens(BTW_SYSTEM_PROMPT) + BTW_TOOL_SCHEMA_TOKENS,
+  });
+}
+
 /**
- * Seed for one BTW question: the latest main-session excerpt (contextual/readonly) or nothing
+ * Seed for one BTW question: the latest main-session snapshot (contextual/readonly) or nothing
  * (tangent). Earlier BTW exchanges stay in the pane and handoffs, never in the model input.
  */
 function buildBtwSeedState(
@@ -583,12 +617,16 @@ function buildBtwSeedState(
     if (useFullMainContext()) {
       messages.push(...mainMessages);
     } else {
-      // Lean start: the latest rounds' messages and answers, never the whole main context.
-      const excerpt = buildMainSessionExcerpt(mainMessages, { sessionFile: ctx.sessionManager.getSessionFile?.() });
-      if (excerpt) {
+      // Budgeted snapshot: status, current task and progress, earlier rounds, the existing summary.
+      const snapshot = buildMainSessionSnapshot(mainMessages, {
+        sessionFile: ctx.sessionManager.getSessionFile?.(),
+        mainRunning: !isMainIdle(ctx),
+        budgetTokens: getSnapshotBudgetTokens(ctx, sessionModel),
+      });
+      if (snapshot) {
         messages.push(
-          { role: "user", content: [{ type: "text", text: excerpt.text }], timestamp: Date.now() },
-          createSyntheticAssistantMessage(BTW_EXCERPT_ACK_TEXT, sessionModel),
+          { role: "user", content: [{ type: "text", text: snapshot.text }], timestamp: Date.now() },
+          createSyntheticAssistantMessage(BTW_SNAPSHOT_ACK_TEXT, sessionModel),
         );
       }
     }
@@ -2374,6 +2412,7 @@ export default function (pi: ExtensionAPI) {
     }) : undefined;
     const sessionManager = SessionManager.inMemory(ctx.cwd);
     const seedLeafId = getMainLeafId(ctx);
+    const seedMainIdle = isMainIdle(ctx);
     const seedMessages = buildBtwSeedState(ctx, mode, settings.model);
 
     // The session manager is the source of provider context. Seed it before
@@ -2442,7 +2481,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    return { session, mode, subscriptions: new Set(), seedLeafId, used: false, promptQueue: Promise.resolve(), hasExtensions };
+    return { session, mode, subscriptions: new Set(), seedLeafId, seedMainIdle, used: false, promptQueue: Promise.resolve(), hasExtensions };
   }
 
   function ensureBtwSession(ctx: ExtensionCommandContext, mode: BtwThreadMode): Promise<BtwSessionRuntime | null> {
@@ -2466,8 +2505,13 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Reuse only an unused child whose seed still matches the main session (e.g. one prewarmed
-    // when the pane opened). Each question otherwise gets a fresh child with the latest excerpt.
-    if (activeBtwSession?.mode === mode && !activeBtwSession.used && activeBtwSession.seedLeafId === getMainLeafId(ctx)) {
+    // when the pane opened). Each question otherwise gets a fresh child with the latest snapshot.
+    if (
+      activeBtwSession?.mode === mode &&
+      !activeBtwSession.used &&
+      activeBtwSession.seedLeafId === getMainLeafId(ctx) &&
+      activeBtwSession.seedMainIdle === isMainIdle(ctx)
+    ) {
       return activeBtwSession;
     }
 

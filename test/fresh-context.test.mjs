@@ -55,7 +55,8 @@ test('each contextual BTW question sees the latest main session, not old BTW ans
   };
   addMain('user', 'MAIN_BEFORE_FIRST_BTW');
   addMain('assistant', 'MAIN_BEFORE_ANSWER');
-  const ctx = { hasUI: true, mode: 'rpc', cwd: directory, model, getSystemPrompt: () => '', isIdle: () => true, isProjectTrusted: () => false,
+  let mainIdle = true;
+  const ctx = { hasUI: true, mode: 'rpc', cwd: directory, model, getSystemPrompt: () => '', isIdle: () => mainIdle, isProjectTrusted: () => false,
     sessionManager: { getBranch: () => branch, getEntries: () => mainEntries, getLeafId: () => leafId, getSessionFile: () => undefined },
     modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: 'offline-fixture' }), getRegisteredNativeProvider: () => undefined, getRegisteredProviderConfig: () => provider, getProviderAuthStatus: () => ({ source: 'models_json_key' }), hasConfiguredAuth: () => true, find: () => model },
     ui: { theme: getThemeByName('dark'), notify: (message, level) => notices.push({ message, level }), setWidget() {} } };
@@ -68,13 +69,29 @@ test('each contextual BTW question sees the latest main session, not old BTW ans
     await commands.get('btw').handler('NEW_BTW_QUESTION', ctx);
 
     assert.equal(requests.length, 2);
+    assert.ok(requests.every(request => request.includes('<main-session-snapshot ')));
     assert.ok(requests[1].includes('MAIN_AFTER_FIRST_BTW') && requests[1].includes('MAIN_AFTER_ANSWER'), 'Second BTW sees the latest main session');
     for (const old of ['OLD_BTW_QUESTION', 'OLD_ANSWER_1']) assert.ok(!requests[1].includes(old), `Second BTW must not include ${old}`);
     assert.equal(branch.filter(e => e.customType === 'btw-thread-entry').length, 2, 'Visible BTW history keeps both exchanges');
+    assert.ok(requests[1].includes('main-status=\\"idle\\"'));
+
+    // Same leaf, but the main session started working: the next question is not answered from a stale idle snapshot.
+    mainIdle = false;
+    await commands.get('btw').handler('RUNNING_BTW_QUESTION', ctx);
+    assert.ok(requests[2].includes('main-status=\\"running\\"') && requests[2].includes('MAIN_AFTER_ANSWER'), 'Running state is fresh');
+    mainIdle = true;
+
 
     await commands.get('btw:inject').handler('', ctx);
     assert.equal(handoffs.length, 1);
     for (const kept of ['OLD_BTW_QUESTION', 'OLD_ANSWER_1', 'NEW_BTW_QUESTION', 'OLD_ANSWER_2']) assert.ok(handoffs[0].message.content.includes(kept), kept);
+
+    // A tangent gets no main-session snapshot.
+    await commands.get('btw:tangent').handler('TANGENT_QUESTION', ctx);
+    assert.ok(requests[3].includes('TANGENT_QUESTION') && !requests[3].includes('<main-session-snapshot ') && !requests[3].includes('MAIN_AFTER_ANSWER'));
+    await commands.get('btw').handler('BACK_TO_CONTEXT', ctx);
+    assert.ok(requests[4].includes('<main-session-snapshot '), 'Contextual BTW gets the snapshot again');
+    assert.equal(mainEntries.length, 4, 'BTW never writes to the main session');
     assert.ok(!notices.some(n => n.level === 'error'), JSON.stringify(notices));
   } finally {
     await events.get('session_shutdown')({}, ctx);

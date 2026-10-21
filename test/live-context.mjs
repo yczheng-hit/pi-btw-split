@@ -77,7 +77,7 @@ for (const mode of modes) {
     const first = requests.find(r => r.probe);
     result.btwRequests = requests.length;
     result.firstRequestEstTokens = first?.estTokens;
-    result.firstRequestUsesExcerpt = first?.excerpt;
+    result.firstRequestUsesSnapshot = first?.snapshot;
     result.btwCompactionCalls = requests.filter(r => r.summarization).length;
     result.mainCompactionsAfter = compactions(await fs.readFile(sessionFile, 'utf8'));
     if (process.env.PI_BTW_CONTEXT_DEBUG) result.requests = requests;

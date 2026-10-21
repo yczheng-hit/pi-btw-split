@@ -229,7 +229,7 @@ test('real extension uses a separate authenticated surface; reuse, draft, shortc
     assert.equal(mainWidgetWrites, mainUpdatesBeforePrompt, 'Native stream/input must not request a main Pi widget repaint');
     assert.deepEqual(requests[0].tools.sort(), ['find', 'grep', 'ls', 'read']);
     const firstContext = JSON.stringify(requests[0].context.messages);
-    assert.ok(firstContext.includes('main-session-excerpt') && firstContext.includes('MAIN_SEED_ONLY'), 'Lean main-session excerpt');
+    assert.ok(firstContext.includes('main-session-snapshot') && firstContext.includes('MAIN_SEED_ONLY'), 'Budgeted main-session snapshot');
     assert.equal(savedEntries.filter(e => e.data?.question === '只读问题').length, 1);
     // Slash command discovery in the composer: live list, Tab cycle, unique completion, unknown guard.
     const frameText = predicate => waitFrame(lines => predicate(lines.map(stripTerminalSequences).join('\n')));
@@ -256,7 +256,7 @@ test('real extension uses a separate authenticated surface; reuse, draft, shortc
     await waitFrame(lines => lines.some(line => stripTerminalSequences(line).includes('离线回答 2')));
     await waitFrame(lines => lines.some(line => stripTerminalSequences(line).includes('2 exchanges')) && lines.some(line => stripTerminalSequences(line).includes('离线回答 1')));
     const secondContext = JSON.stringify(requests[1].context.messages);
-    assert.ok(secondContext.includes('第二问') && secondContext.includes('MAIN_SEED_ONLY'), 'Second question gets a fresh main-session excerpt');
+    assert.ok(secondContext.includes('第二问') && secondContext.includes('MAIN_SEED_ONLY'), 'Second question gets a fresh main-session snapshot');
     assert.ok(!secondContext.includes('只读问题') && !secondContext.includes('离线回答 1'), 'Earlier BTW exchanges stay out of the model input');
     const resetsBeforeHandoff = savedEntries.filter(e => e.type === 'btw-thread-reset').length;
     input('/inj'); input('\r'); // unique partial command runs /btw:inject (user-reported /summ case)

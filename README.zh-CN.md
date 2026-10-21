@@ -4,7 +4,7 @@
 
 一个 [pi](https://github.com/earendil-works/pi-mono) 扩展，提供 `/btw` 旁路对话：主 agent 继续工作的同时，你可以另开一个对话。在 [Herdr](https://herdr.dev) 里它显示为右侧的原生 pane；在其他环境里显示为 Pi 内部的 60/40 分屏。
 
-本项目在 [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split) 独立维护，基于 Dan Bachelder 的 MIT 授权项目 pi-btw 0.7.1。版本：`0.7.1-split.5`。历史 Linux 验证覆盖 Pi 1.0.4、1.2.0 和 Herdr 0.9.3。原生 macOS 验证覆盖 arm64、Pi 1.2.0、Node 24.20 和 Herdr 客户端/服务端 0.9.1；这些结果不代表对所有主机或未来版本的保证。
+本项目在 [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split) 独立维护，基于 Dan Bachelder 的 MIT 授权项目 pi-btw 0.7.1。版本：`0.7.1-split.6`。历史 Linux 验证覆盖 Pi 1.0.4、1.2.0 和 Herdr 0.9.3。原生 macOS 验证覆盖 arm64、Pi 1.2.0、Node 24.20 和 Herdr 客户端/服务端 0.9.1；这些结果不代表对所有主机或未来版本的保证。
 
 支持和问题反馈使用[本仓库的 Issues](https://github.com/yczheng-hit/pi-btw-split/issues)，更新和回滚使用本项目自身历史。下方相关项目仅用于对比和致谢，不是维护入口。
 
@@ -26,7 +26,7 @@ agent 会检查前置条件、安装扩展、在适用时注册 Herdr pane 插�
 | 旁路对话显示位置 | 主会话上方居中浮层 | 新的 Herdr pane | Herdr：右侧原生 pane；其他环境：Pi 内部 60/40 分屏 |
 | 旁路对话进程 | 父 Pi 内的子会话 | 另起一个完整 Pi 进程（`herdr agent start --kind pi`） | 父 Pi 内的子会话；Herdr pane 只是一个通过本地 socket 连接的轻量 Node 前端 |
 | 是否需要 Herdr | 否 | 是（v0.7.4+） | 否；原生 pane 需要 Linux 或 macOS 上的 Herdr 0.9.1+ |
-| 旁路对话拿到的上下文 | 复制整个主分支 | 父上下文的静态快照；原样复用系统提示词以命中 provider 的 prompt cache | 主会话最近 3 轮的摘录（用户消息 + 文字回答）加主会话 transcript 路径。`PI_BTW_CONTEXT=full` 复制全部 |
+| 旁路对话拿到的上下文 | 复制整个主分支 | 父上下文的静态快照；原样复用系统提示词以命中 provider 的 prompt cache | 每个问题都重新取一份有预算的主会话快照（当前任务及其工具进度、之前几轮、已有的压缩摘要；最多占空闲窗口 25%，不超过 12k token），加主会话 transcript 路径。`PI_BTW_CONTEXT=full` 复制全部 |
 | 旁路对话自动压缩 | 开启（遵循你的 Pi 设置） | Pi 默认设置（以普通 Pi 进程运行） | 开启（遵循你的 Pi 设置）。精简启动避免复制完整主上下文；BTW 长对话仍会压缩 |
 | 模式 | `/btw`、`/btw:tangent`（无上下文）、`/btw:ask`（只读） | 单一模式；工具范围由配置决定（`inherit/all/read-only/none`） | 同上游 |
 | 交回主 agent | `/btw:inject`、`/btw:summarize`：作为用户消息发送，主 agent 忙时排队到 follow-up | 在旁路 pane 中 `/btw merge <prompt>`；等父会话空闲后送达 | 带标签的 `BTW → main` 消息，主 agent 忙时在下一步插入（steer）。inject 确认送达前保留线程；summarize 总结生成后立即清空线程。未送达的内容保留以便重发 |
