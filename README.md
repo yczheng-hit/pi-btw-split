@@ -4,7 +4,7 @@
 
 A [pi](https://github.com/earendil-works/pi-mono) extension that adds `/btw`: a side conversation that runs while the main agent keeps working. In [Herdr](https://herdr.dev) it opens in a native right-hand pane; elsewhere it opens as a 60/40 split inside Pi.
 
-This project is independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Version: `0.7.1-split.8`. Historical Linux validation covered Pi 1.0.4 and 1.2.0 with Herdr 0.9.3. Native macOS validation covers arm64, Pi 1.2.0, Node 24.20 and Herdr client/server 0.9.1; these results are not a guarantee for every host or future version.
+This project is independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Version: `0.7.1-split.9`. Historical Linux validation covered Pi 1.0.4 and 1.2.0 with Herdr 0.9.3. Native macOS validation covers arm64, Pi 1.2.0, Node 24.20 and Herdr client/server 0.9.1; these results are not a guarantee for every host or future version.
 
 Use [this repository's issues](https://github.com/yczheng-hit/pi-btw-split/issues) for support and bug reports, and this project's own history for updates and rollback. The related projects below are comparisons and credits, not maintenance destinations.
 
@@ -114,6 +114,8 @@ Inside the BTW composer, short forms work (`/ask`, `/new`, `/summ`), Tab complet
 |---|---|
 | `Alt+/`, `Super+/`, `Ctrl+Alt+W` | Switch focus between main and BTW. Remap with `PI_BTW_FOCUS_KEYS="ctrl+/,ctrl+alt+b"` |
 | `Alt+w` | Herdr: zoom the BTW pane. In-Pi: toggle full-width mode for clean copy |
+| `↑` / `↓` | Prompt history, same as the main editor: `↑` on an empty input (or at column 0) recalls earlier BTW questions, `↓` walks back to your draft. History covers this session's BTW questions, including those before `/btw:new` |
+| `PgUp` / `PgDn`, mouse wheel | Scroll the BTW transcript |
 | `Esc` | While streaming: abort (keeps partial output). While idle: close BTW. Closing keeps the thread and draft; `/btw` reopens them |
 
 ### Behavior notes

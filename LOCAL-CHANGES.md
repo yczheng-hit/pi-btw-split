@@ -1,4 +1,4 @@
-# pi-btw-split changes (0.7.1-split.8)
+# pi-btw-split changes (0.7.1-split.9)
 
 Independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Maintenance, updates and support belong to this project; related-project links in the READMEs are comparisons and credits, not support destinations.
 Dated validations and measurements below are historical results from the configurations described, not current test counts, performance promises, or guarantees for other hosts. Current setup and development commands are in [README.md](README.md).
@@ -360,6 +360,25 @@ Install this package with `pi install git:github.com/yczheng-hit/pi-btw-split` o
 
 Rollback: in the installed checkout, inspect `git status` and preserve local changes, check out an earlier commit with `git switch --detach <commit>`, and run `/reload`. Return with `git switch main` and `/reload`. For a Git install, `pi install git:github.com/yczheng-hit/pi-btw-split@<commit>` pins a version instead.
 
+
+## Up/Down = prompt history, like the main editor (split.9, 2026-10-22)
+
+- `↑`/`↓` in the BTW composer no longer scroll the transcript one line. They follow the main
+  editor's rules for a single-line input: `↑` recalls the previous prompt when the input is
+  empty, already browsing, or the cursor is at column 0 (otherwise it jumps to the line start);
+  `↓` moves toward the newest entry and then restores the unsent draft and its cursor (otherwise
+  it jumps to the line end). Editing a recalled prompt leaves browsing. Remapped
+  `tui.editor.cursorUp/Down` and `tui.editor.historyPrevious/Next` keybindings are honoured.
+- History: every prompt submitted in the composer and every `/btw…` question from the main editor,
+  most recent first, consecutive duplicates collapsed, at most 100. After reload or session
+  switch it is rebuilt from this branch's saved BTW questions, across `/btw:new` resets.
+  It lives in the parent Pi, so closing and reopening the pane keeps it.
+- `PgUp`/`PgDn` and the mouse wheel still scroll the transcript. The hint line says so.
+
+**Validated.** New `test/history-keys.test.mjs` drives the real extension with the host
+`KeybindingsManager` (all three tests fail against split.8). Real Pi 1.4.0 in tmux (internal
+split, offline fake provider): `↑`/`↓` recalled 第二个问题 → 第一个问题 → back to empty, and a typed draft
+was restored. `npm test` 37/37, typecheck pass.
 
 ## Larger default snapshot (split.8, 2026-10-21)
 

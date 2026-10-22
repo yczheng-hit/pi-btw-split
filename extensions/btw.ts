@@ -1447,6 +1447,12 @@ class BtwOverlayComponent extends Container implements Focusable {
   private transcriptKey: string | undefined;
   private wrappedCache: { lines: string[]; width: number; wrapped: string[] } | undefined;
   private transcriptScrollOffset = 0;
+  private readonly keybindings: KeybindingsManager;
+  /** Submitted prompts, most recent first; owned by the extension so it outlives this component. */
+  getPromptHistory: () => readonly string[] = () => [];
+  /** Same model as the main editor: -1 = not browsing, 0 = most recent. */
+  private historyIndex = -1;
+  private historyDraft: { value: string; cursor: number } | null = null;
   private transcriptViewportHeight = 8;
   private contentWidth = 66;
   private followTranscript = true;
@@ -1483,6 +1489,7 @@ class BtwOverlayComponent extends Container implements Focusable {
     private readonly nativeSurface = false,
   ) {
     super();
+    this.keybindings = keybindings;
     this.tui = tui;
     this.theme = theme;
     this.markdownTheme = getMarkdownTheme();
@@ -1504,6 +1511,7 @@ class BtwOverlayComponent extends Container implements Focusable {
 
     this.input = new Input();
     this.input.onSubmit = (value) => {
+      this.exitHistoryBrowsing();
       this.followTranscript = true;
       this.onSubmitCallback(value);
     };
@@ -1539,10 +1547,74 @@ class BtwOverlayComponent extends Container implements Focusable {
         return;
       }
       this.completionCycle = undefined;
+      const before = this.input.getValue();
       originalHandleInput(data);
+      // Like the main editor: editing a recalled prompt leaves history browsing.
+      if (this.historyIndex > -1 && this.input.getValue() !== before) this.exitHistoryBrowsing();
     };
 
     this.refresh();
+  }
+
+  /**
+   * Up/Down behave like the main editor (single line): Up recalls older prompts when the
+   * input is empty, already browsing, or the cursor is at column 0, otherwise jumps to the
+   * line start; Down walks back toward the draft while browsing, otherwise jumps to the end.
+   * The dedicated history actions always browse. PgUp/PgDn and the wheel scroll the transcript.
+   */
+  private handleHistoryKey(data: string): boolean {
+    const kb = this.keybindings;
+    if (kb.matches(data, "tui.editor.historyPrevious")) { this.navigateHistory(-1); return true; }
+    if (kb.matches(data, "tui.editor.historyNext")) { this.navigateHistory(1); return true; }
+    if (kb.matches(data, "tui.editor.cursorUp")) {
+      if (this.input.getValue() === "" || this.historyIndex > -1 || this.inputCursor === 0) this.navigateHistory(-1);
+      else this.setInputCursor(0);
+      return true;
+    }
+    if (kb.matches(data, "tui.editor.cursorDown")) {
+      if (this.historyIndex > -1) this.navigateHistory(1);
+      else this.setInputCursor(this.input.getValue().length);
+      return true;
+    }
+    return false;
+  }
+
+  private navigateHistory(direction: -1 | 1): void {
+    const history = this.getPromptHistory();
+    if (history.length === 0) return;
+    const next = this.historyIndex - direction;
+    if (next < -1 || next >= history.length) return;
+    if (this.historyIndex === -1 && next >= 0) {
+      this.historyDraft = { value: this.input.getValue(), cursor: this.inputCursor };
+    }
+    this.historyIndex = next;
+    if (next === -1) {
+      const draft = this.historyDraft ?? { value: "", cursor: 0 };
+      this.historyDraft = null;
+      this.input.setValue(draft.value);
+      this.setInputCursor(draft.cursor);
+    } else {
+      const text = history[next] ?? "";
+      this.input.setValue(text);
+      this.setInputCursor(direction === -1 ? 0 : text.length);
+    }
+    this.completionCycle = undefined;
+    this.tui.requestRender();
+  }
+
+  private exitHistoryBrowsing(): void {
+    this.historyIndex = -1;
+    this.historyDraft = null;
+  }
+
+  // pi-tui's Input keeps its cursor private; it is a plain UTF-16 index into the value.
+  private get inputCursor(): number {
+    return (this.input as unknown as { cursor: number }).cursor;
+  }
+
+  private setInputCursor(cursor: number): void {
+    (this.input as unknown as { cursor: number }).cursor = Math.max(0, Math.min(cursor, this.input.getValue().length));
+    this.tui.requestRender();
   }
 
   private get borderless(): boolean {
@@ -1659,15 +1731,17 @@ class BtwOverlayComponent extends Container implements Focusable {
       return;
     }
 
-    if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.up)) {
-      const step = matchesKey(data, Key.pageUp) ? Math.max(1, this.transcriptViewportHeight - 1) : 1;
-      this.scrollTranscript(-step);
+    if (matchesKey(data, Key.pageUp)) {
+      this.scrollTranscript(-Math.max(1, this.transcriptViewportHeight - 1));
       return;
     }
 
-    if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.down)) {
-      const step = matchesKey(data, Key.pageDown) ? Math.max(1, this.transcriptViewportHeight - 1) : 1;
-      this.scrollTranscript(step);
+    if (matchesKey(data, Key.pageDown)) {
+      this.scrollTranscript(Math.max(1, this.transcriptViewportHeight - 1));
+      return;
+    }
+
+    if (this.handleHistoryKey(data)) {
       return;
     }
 
@@ -1867,7 +1941,7 @@ class BtwOverlayComponent extends Container implements Focusable {
     const status = this.getStatus() ?? "Ready. Enter submits; Escape dismisses without clearing.";
     this.statusTextValue = status;
     this.statusText.setText(this.statusTextValue);
-    this.hintsTextValue = `Scroll wheel ↑↓ PgUp/PgDn · Enter · ${BTW_FOCUS_SHORTCUTS_LABEL} focus · Alt+w ${this.nativeSurface ? "zoom" : "width"} · Esc`;
+    this.hintsTextValue = `Wheel/PgUp/PgDn scroll · ↑↓ history · Enter · ${BTW_FOCUS_SHORTCUTS_LABEL} focus · Alt+w ${this.nativeSurface ? "zoom" : "width"} · Esc`;
     this.hintsText.setText(this.hintsTextValue);
     this.tui.requestRender();
   }
@@ -1881,6 +1955,14 @@ export default function (pi: ExtensionAPI) {
   let transcriptState = createEmptyTranscriptState();
   let overlayStatus: string | null = null;
   let overlayDraft = "";
+  /** BTW composer history, most recent first, like the main editor's prompt history. */
+  let promptHistory: string[] = [];
+  const addPromptHistory = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || promptHistory[0] === trimmed) return;
+    promptHistory.unshift(trimmed);
+    if (promptHistory.length > 100) promptHistory.pop();
+  };
   let overlayWidthMode: BtwOverlayWidthMode = "window";
   let overlayRuntime: OverlayRuntime | null = null;
   const nativeSurfaces = new Set<NativeSurface>();
@@ -2604,6 +2686,7 @@ export default function (pi: ExtensionAPI) {
             () => { void surface.pane.focus(true).catch((error) => notify(ctx, String(error), "error")); },
             () => { void surface.pane.zoom().catch((error) => notify(ctx, String(error), "error")); },
             geometry, true);
+          component.getPromptHistory = () => promptHistory;
           component.setDraft(overlayDraft);
           return component;
         },
@@ -2709,6 +2792,7 @@ export default function (pi: ExtensionAPI) {
 
           splitLayout.bindOverlay(overlay);
           overlay.focused = runtime.handle?.isFocused() ?? true;
+          overlay.getPromptHistory = () => promptHistory;
           overlay.setDraft(overlayDraft);
           runtime.setDraft = (value) => {
             overlay.setDraft(value);
@@ -2958,6 +3042,7 @@ export default function (pi: ExtensionAPI) {
       setOverlayStatus("Enter a BTW prompt before submitting.", ctx);
       return;
     }
+    addPromptHistory(question);
 
     if (!("getSystemPrompt" in ctx)) {
       setOverlayStatus("BTW overlay submit requires a command context. Reopen BTW from a command.", ctx);
@@ -3033,6 +3118,7 @@ export default function (pi: ExtensionAPI) {
     btwThinkingOverride = null;
     transcriptState = createEmptyTranscriptState();
     overlayDraft = "";
+    promptHistory = [];
     lastUiContext = ctx;
     overlayStatus = null;
 
@@ -3083,6 +3169,12 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    // Like the main editor after a reload: every BTW question on this branch, across resets.
+    for (const entry of branch) {
+      const question = isCustomEntry(entry, BTW_ENTRY_TYPE) ? (entry as unknown as { data?: BtwDetails }).data?.question : undefined;
+      if (typeof question === "string") addPromptHistory(question);
+    }
+
     for (const entry of branch.slice(lastResetIndex + 1)) {
       if (!isCustomEntry(entry, BTW_ENTRY_TYPE)) {
         continue;
@@ -3131,6 +3223,8 @@ export default function (pi: ExtensionAPI) {
     saveRequested: boolean,
     mode: BtwThreadMode,
   ): Promise<void> {
+    // Questions sent with /btw from the main editor are recalled in the BTW composer too.
+    addPromptHistory(question);
     const blocked = pendingHandoffBlock();
     if (blocked) {
       setOverlayStatus(blocked, ctx);

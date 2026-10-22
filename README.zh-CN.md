@@ -4,7 +4,7 @@
 
 一个 [pi](https://github.com/earendil-works/pi-mono) 扩展，提供 `/btw` 旁路对话：主 agent 继续工作的同时，你可以另开一个对话。在 [Herdr](https://herdr.dev) 里它显示为右侧的原生 pane；在其他环境里显示为 Pi 内部的 60/40 分屏。
 
-本项目在 [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split) 独立维护，基于 Dan Bachelder 的 MIT 授权项目 pi-btw 0.7.1。版本：`0.7.1-split.8`。历史 Linux 验证覆盖 Pi 1.0.4、1.2.0 和 Herdr 0.9.3。原生 macOS 验证覆盖 arm64、Pi 1.2.0、Node 24.20 和 Herdr 客户端/服务端 0.9.1；这些结果不代表对所有主机或未来版本的保证。
+本项目在 [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split) 独立维护，基于 Dan Bachelder 的 MIT 授权项目 pi-btw 0.7.1。版本：`0.7.1-split.9`。历史 Linux 验证覆盖 Pi 1.0.4、1.2.0 和 Herdr 0.9.3。原生 macOS 验证覆盖 arm64、Pi 1.2.0、Node 24.20 和 Herdr 客户端/服务端 0.9.1；这些结果不代表对所有主机或未来版本的保证。
 
 支持和问题反馈使用[本仓库的 Issues](https://github.com/yczheng-hit/pi-btw-split/issues)，更新和回滚使用本项目自身历史。下方相关项目仅用于对比和致谢，不是维护入口。
 
@@ -114,6 +114,8 @@ pi install git:github.com/yczheng-hit/pi-btw-split   # 或：pi install /absolut
 |---|---|
 | `Alt+/`、`Super+/`、`Ctrl+Alt+W` | 在主会话和 BTW 之间切换焦点。可用 `PI_BTW_FOCUS_KEYS="ctrl+/,ctrl+alt+b"` 重新映射 |
 | `Alt+w` | Herdr：放大 BTW pane。Pi 内部分屏：切换全宽模式，便于复制 |
+| `↑` / `↓` | 输入历史，和主会话编辑器一致：输入框为空（或光标在行首）时按 `↑` 调出之前的 BTW 问题，`↓` 回到正在写的草稿。历史包含本会话所有 BTW 问题，`/btw:new` 之前的也在 |
+| `PgUp` / `PgDn`、鼠标滚轮 | 滚动 BTW 对话记录 |
 | `Esc` | 输出中：中止（保留已输出部分）。空闲时：关闭 BTW。关闭会保留线程和草稿，`/btw` 重新打开 |
 
 ### 行为说明
