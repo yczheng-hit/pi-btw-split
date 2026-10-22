@@ -126,9 +126,10 @@ test('main-session snapshot: existing compaction summary is trimmed by priority,
   for (const dropped of ['READ_FILE_LIST', 'MODIFIED_FILE_LIST']) assert.ok(!snapshot.text.includes(dropped), dropped);
   assert.ok(snapshot.omitted.summarySections > 0 && /summary (sections omitted|trimmed to fit)/.test(snapshot.text));
 
-  // Budget: 25% of what is left, between 1.5k and 12k, never more than what is left.
-  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 1_000_000, reserveTokens: 16384, fixedTokens: 5000 }), 12000);
-  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 32000, reserveTokens: 16384, fixedTokens: 4000 }), 2404);
+  // Budget: 60% of what is left, at least 1.5k, never more than what is left; no fixed ceiling.
+  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 1_000_000, reserveTokens: 16384, fixedTokens: 5000 }), 585969);
+  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 1_000_000, reserveTokens: 16384, fixedTokens: 5000, maxTokens: 1_000_000 }), 585969, 'Main window as ceiling');
+  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 32000, reserveTokens: 16384, fixedTokens: 4000 }), 5769);
   assert.equal(computeSnapshotBudgetTokens({ contextWindow: 24000, reserveTokens: 16384, fixedTokens: 4600 }), 1016);
   assert.equal(computeSnapshotBudgetTokens({ contextWindow: 8000, reserveTokens: 16384 }), 500, 'No room: a minimal status snapshot');
   assert.equal(computeSnapshotBudgetTokens({}), 8000);
@@ -136,12 +137,12 @@ test('main-session snapshot: existing compaction summary is trimmed by priority,
   assert.equal(computeSnapshotBudgetTokens({ contextWindow: 200_000, reserveTokens: 16384, fixedTokens: 5000, share: 0.5, maxTokens: 50_000 }), 50000);
   assert.equal(computeSnapshotBudgetTokens({ contextWindow: 64000, reserveTokens: 16384, fixedTokens: 5000, share: 0.5, maxTokens: 50_000 }), 20308);
   const { context: { snapshotBudgetSettings } } = await loadExtension();
-  assert.deepEqual(snapshotBudgetSettings({}, {}), { share: 0.25, maxTokens: 12000 });
+  assert.deepEqual(snapshotBudgetSettings({}, {}), { share: 0.6 }, 'Defaults: 60%, ceiling = main window');
   for (const share of [0.5, 50, '50%', '0.5']) assert.equal(snapshotBudgetSettings({ share }, {}).share, 0.5, String(share));
   assert.equal(snapshotBudgetSettings({ maxTokens: '24k' }, {}).maxTokens, 24000);
   assert.deepEqual(snapshotBudgetSettings({ share: 0.5, maxTokens: 24000 }, { PI_BTW_SNAPSHOT_SHARE: '30%', PI_BTW_SNAPSHOT_MAX_TOKENS: '16k' }), { share: 0.3, maxTokens: 16000 }, 'Env wins');
-  assert.deepEqual(snapshotBudgetSettings({ share: 'abc', maxTokens: -1 }, {}), { share: 0.25, maxTokens: 12000 }, 'Invalid values are ignored');
-  assert.deepEqual(snapshotBudgetSettings({ share: 0.99, maxTokens: 10 }, {}), { share: 0.8, maxTokens: 1500 }, 'Clamped');
+  assert.deepEqual(snapshotBudgetSettings({ share: 'abc', maxTokens: -1 }, {}), { share: 0.6 }, 'Invalid values are ignored');
+  assert.deepEqual(snapshotBudgetSettings({ share: 0.99, maxTokens: 10 }, {}), { share: 0.9, maxTokens: 1500 }, 'Clamped');
 });
 
 test('BTW child settings: lean/full both inherit compaction settings without writing files', async () => {
@@ -258,13 +259,13 @@ test('real BTW session: budgeted snapshot by default, no compaction on a near-fu
     `Full mode compacts or overflows: ${full.calls.length} calls, ${JSON.stringify(full.notices)}`);
   if (process.env.PI_BTW_TEST_VERBOSE) console.log(JSON.stringify({ leanCalls: lean.calls.length, leanChars: request.length, fullCalls: full.calls.length, fullChars: full.calls.map(c => c.length) }));
 
-  // btw.json snapshot.share 50%: a bigger snapshot that still fits, still one call.
-  const half = await ask('lean', { snapshot: { share: '50%' } });
-  assert.equal(half.calls.length, 1, '50% share still answers without compaction');
-  const halfSnapshot = JSON.parse(half.calls[0].slice(0, half.calls[0].lastIndexOf('\n')))[0].content[0].text;
-  const halfBudget = context.computeSnapshotBudgetTokens({ contextWindow: 32000, reserveTokens: 16384, fixedTokens: context.estimateTextTokens('PARENT_PROMPT ' + 'p'.repeat(12000)) + context.estimateTextTokens(btw.BTW_SYSTEM_PROMPT) + context.BTW_TOOL_SCHEMA_TOKENS, share: 0.5 });
-  assert.ok(halfBudget > budget && context.estimateTextTokens(halfSnapshot) <= halfBudget);
-  assert.ok(context.estimateTextTokens(halfSnapshot) > context.estimateTextTokens(snapshotText), 'Larger share gives a larger snapshot');
+  // btw.json snapshot.share 25%: a smaller snapshot within its budget, still one call.
+  const quarter = await ask('lean', { snapshot: { share: '25%' } });
+  assert.equal(quarter.calls.length, 1, '25% share still answers without compaction');
+  const quarterSnapshot = JSON.parse(quarter.calls[0].slice(0, quarter.calls[0].lastIndexOf('\n')))[0].content[0].text;
+  const quarterBudget = context.computeSnapshotBudgetTokens({ contextWindow: 32000, reserveTokens: 16384, fixedTokens: context.estimateTextTokens('PARENT_PROMPT ' + 'p'.repeat(12000)) + context.estimateTextTokens(btw.BTW_SYSTEM_PROMPT) + context.BTW_TOOL_SCHEMA_TOKENS, share: 0.25 });
+  assert.ok(quarterBudget < budget && context.estimateTextTokens(quarterSnapshot) <= quarterBudget);
+  assert.ok(context.estimateTextTokens(quarterSnapshot) < context.estimateTextTokens(snapshotText), 'Smaller share gives a smaller snapshot');
   if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
   await fs.rm(agentDir, { recursive: true, force: true });
 });

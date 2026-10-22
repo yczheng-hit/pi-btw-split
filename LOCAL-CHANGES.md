@@ -1,4 +1,4 @@
-# pi-btw-split changes (0.7.1-split.7)
+# pi-btw-split changes (0.7.1-split.8)
 
 Independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Maintenance, updates and support belong to this project; related-project links in the READMEs are comparisons and credits, not support destinations.
 Dated validations and measurements below are historical results from the configurations described, not current test counts, performance promises, or guarantees for other hosts. Current setup and development commands are in [README.md](README.md).
@@ -361,6 +361,23 @@ Install this package with `pi install git:github.com/yczheng-hit/pi-btw-split` o
 Rollback: in the installed checkout, inspect `git status` and preserve local changes, check out an earlier commit with `git switch --detach <commit>`, and run `/reload`. Return with `git switch main` and `/reload`. For a Git install, `pi install git:github.com/yczheng-hit/pi-btw-split@<commit>` pins a version instead.
 
 
+## Larger default snapshot (split.8, 2026-10-21)
+
+- Default share 25% → 60% of the free window. Allowed range 5–90%.
+- No fixed 12k ceiling. The default ceiling is the main session's context window
+  (`ctx.model.contextWindow`); `snapshot.maxTokens` still lowers it (range 1.5k–10M).
+- The budget is still computed from the BTW model's window, so a smaller BTW model gets a smaller
+  snapshot and the first question still does not compact.
+- Items are no longer pre-clipped (1.2k chars per progress text, 1.5k/2.5k per earlier round).
+  They stay whole and are clipped only when the budget is short.
+- In practice the snapshot is still much smaller than the budget, because tool output and file
+  lists are never copied: an offline replay of a real session (about 80 tool calls after a mid-turn
+  compaction) gave about 8.9k tokens at a 1M, 272k and 128k window, built in about 2 ms.
+
+**Validated.** Budget unit tests for the new defaults; the real-extension test checks that the
+default fits with one call and that `share: "25%"` gives a smaller snapshot. `npm test` 34/34,
+typecheck pass.
+
 ## Configurable snapshot size (split.7, 2026-10-21)
 
 `~/.pi/agent/btw.json` (under `PI_CODING_AGENT_DIR` when set):
@@ -370,7 +387,7 @@ Rollback: in the installed checkout, inspect `git status` and preserve local cha
 ```
 
 - `share`: part of the free window the snapshot may use. `0.5`, `50` and `"50%"` are the same.
-  Default 25%, clamped to 5–80%.
+  Default 25% (60% from split.8), clamped to 5–80% (5–90% from split.8).
 - `maxTokens`: ceiling. `24000` or `"24k"`. Default 12k, clamped to 1.5k–200k.
 - `PI_BTW_SNAPSHOT_SHARE` / `PI_BTW_SNAPSHOT_MAX_TOKENS` override the file. Invalid values are ignored.
 - Read on every question, so edits apply to the next question without `/reload`.

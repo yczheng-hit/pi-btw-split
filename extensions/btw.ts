@@ -592,6 +592,8 @@ function getSnapshotBudgetTokens(ctx: ExtensionCommandContext, sessionModel: Ses
     contextWindow: sessionModel?.contextWindow,
     reserveTokens,
     fixedTokens: estimateTextTokens(systemPrompt) + estimateTextTokens(BTW_SYSTEM_PROMPT) + BTW_TOOL_SCHEMA_TOKENS,
+    // Default ceiling: the main session's own context window, so BTW can see as much as the main model.
+    maxTokens: ctx.model?.contextWindow,
     ...snapshotBudgetSettings(readBtwSnapshotConfig(agentDir)),
   });
 }

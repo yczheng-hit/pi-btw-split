@@ -8,16 +8,18 @@
  * question never has to compact.
  */
 
-/** Hard ceiling for the snapshot, in tokens. */
-export const BTW_SNAPSHOT_MAX_TOKENS = 12000;
 /** Floor for the snapshot when the window allows it. */
 export const BTW_SNAPSHOT_MIN_TOKENS = 1500;
 /** Status and task only, when the window has no room left. */
 export const BTW_SNAPSHOT_EMERGENCY_TOKENS = 500;
 /** Used when the BTW model reports no context window. */
 export const BTW_SNAPSHOT_FALLBACK_TOKENS = 8000;
-/** Share of the free context the snapshot may take. */
-export const BTW_SNAPSHOT_SHARE = 0.25;
+/**
+ * Share of the free context the snapshot may take. The rest is left for the answer and for
+ * transcript lookups. There is no fixed ceiling by default: the caller passes the main session's
+ * context window as `maxTokens`.
+ */
+export const BTW_SNAPSHOT_SHARE = 0.6;
 /** Room kept for the question itself. */
 export const BTW_QUESTION_RESERVE_TOKENS = 2000;
 /** Rough size of the BTW tool schemas, which are not known before the child session exists. */
@@ -64,21 +66,22 @@ export function estimateTextTokens(text: string): number {
 }
 
 /** Limits for the user overrides below. */
-const SNAPSHOT_SHARE_RANGE = [0.05, 0.8] as const;
-const SNAPSHOT_MAX_TOKENS_RANGE = [1500, 200000] as const;
+const SNAPSHOT_SHARE_RANGE = [0.05, 0.9] as const;
+const SNAPSHOT_MAX_TOKENS_RANGE = [1500, 10_000_000] as const;
 
 type SnapshotConfig = { share?: unknown; maxTokens?: unknown };
 
 /**
  * Snapshot size settings. Sources, highest first: `PI_BTW_SNAPSHOT_SHARE` / `PI_BTW_SNAPSHOT_MAX_TOKENS`,
- * then `snapshot.share` / `snapshot.maxTokens` in `~/.pi/agent/btw.json`, then the defaults.
+ * then `snapshot.share` / `snapshot.maxTokens` in `~/.pi/agent/btw.json`, then the defaults
+ * (60%, no extra ceiling: `maxTokens` undefined means the main session's context window).
  * Share accepts `0.5`, `50` or `"50%"`; max tokens accepts `24000` or `"24k"`. Out-of-range values
  * are clamped; invalid values are ignored.
  */
 export function snapshotBudgetSettings(
   config: SnapshotConfig = {},
   env: NodeJS.ProcessEnv = process.env,
-): { share: number; maxTokens: number } {
+): { share: number; maxTokens?: number } {
   const clamp = (value: number, [low, high]: readonly [number, number]) => Math.min(high, Math.max(low, value));
   const parse = (raw: unknown, suffix: string, scale: number): number | undefined => {
     if (raw === undefined || raw === null || raw === "") return undefined;
@@ -90,14 +93,14 @@ export function snapshotBudgetSettings(
   const maxValue = parse(env.PI_BTW_SNAPSHOT_MAX_TOKENS, "k", 1000) ?? parse(config.maxTokens, "k", 1000);
   return {
     share: shareValue === undefined ? BTW_SNAPSHOT_SHARE : clamp(shareValue > 1 ? shareValue / 100 : shareValue, SNAPSHOT_SHARE_RANGE),
-    maxTokens: maxValue === undefined ? BTW_SNAPSHOT_MAX_TOKENS : Math.floor(clamp(maxValue, SNAPSHOT_MAX_TOKENS_RANGE)),
+    ...(maxValue === undefined ? {} : { maxTokens: Math.floor(clamp(maxValue, SNAPSHOT_MAX_TOKENS_RANGE)) }),
   };
 }
 
 /**
- * Snapshot budget: a share (default 25%) of the context left after Pi's compaction reserve, the
- * fixed prompt and the question, between 1.5k and a ceiling (default 12k), and never more than
- * what is left.
+ * Snapshot budget: a share (default 60%) of the context left after Pi's compaction reserve, the
+ * fixed prompt and the question; at least 1.5k, never more than what is left, and never more than
+ * `maxTokens` (default: the main session's context window, i.e. no extra ceiling).
  */
 export function computeSnapshotBudgetTokens(options: {
   contextWindow?: number;
@@ -107,7 +110,7 @@ export function computeSnapshotBudgetTokens(options: {
   maxTokens?: number;
 }): number {
   const share = options.share ?? BTW_SNAPSHOT_SHARE;
-  const maxTokens = options.maxTokens ?? BTW_SNAPSHOT_MAX_TOKENS;
+  const maxTokens = options.maxTokens ?? Number.POSITIVE_INFINITY;
   const window = options.contextWindow ?? 0;
   if (!(window > 0)) return Math.min(BTW_SNAPSHOT_FALLBACK_TOKENS, maxTokens);
   const available = window - (options.reserveTokens ?? 0) - (options.fixedTokens ?? 0) - BTW_QUESTION_RESERVE_TOKENS;
@@ -327,7 +330,7 @@ function renderTask(round: Round, budget: number): Rendered {
 function renderProgress(round: Round, budget: number, mainRunning: boolean): Rendered {
   const lines = round.items.map((item) =>
     item.kind === "text"
-      ? `- Assistant: ${clipMiddle(item.text, PROGRESS_TEXT_CHARS).replace(/\n/g, "\n  ")}`
+      ? `- Assistant: ${item.text.replace(/\n/g, "\n  ")}`
       : formatCall(item.call, mainRunning),
   );
   const failed = round.calls.filter((call) => call.status === "error").length;
@@ -344,6 +347,7 @@ function renderProgress(round: Round, budget: number, mainRunning: boolean): Ren
     lines,
     Math.max(0, budget - reserved),
     [
+      (line) => (line.startsWith("- Assistant:") ? clipMiddle(line, PROGRESS_TEXT_CHARS) : line),
       (line) => (line.startsWith("- Assistant:") ? clipMiddle(line, PROGRESS_TEXT_SHRUNK_CHARS) : line),
       (line) => (line.startsWith("- Assistant:") ? oneLine(line, PROGRESS_TEXT_TINY_CHARS) : line),
     ],
@@ -366,12 +370,15 @@ function renderRecent(rounds: Round[], budget: number): Rendered {
   const blocks: string[] = [];
   let used = 0;
   let index = rounds.length - 1;
-  const full = (round: Round) => {
+  // Newest rounds first, each as large as fits: whole, clipped, then one line.
+  const full = (round: Round, clip: boolean) => {
     const calls = round.calls.length;
     const failed = round.calls.filter((call) => call.status === "error").length;
+    const request = round.requests.join("\n\n[Follow-up]\n");
+    const answer = finalAnswer(round);
     return [
-      `User: ${clipMiddle(round.requests.join("\n\n[Follow-up]\n"), RECENT_REQUEST_CHARS)}`,
-      `Assistant: ${clipMiddle(finalAnswer(round), RECENT_ANSWER_CHARS) || "(no text answer)"}`,
+      `User: ${clip ? clipMiddle(request, RECENT_REQUEST_CHARS) : request}`,
+      `Assistant: ${(clip ? clipMiddle(answer, RECENT_ANSWER_CHARS) : answer) || "(no text answer)"}`,
       ...(calls > 0 ? [`(${calls} tool call${calls === 1 ? "" : "s"}${failed > 0 ? `, ${failed} failed` : ""})`] : []),
     ].join("\n");
   };
@@ -380,7 +387,8 @@ function renderRecent(rounds: Round[], budget: number): Rendered {
   const marker = (count: number) => `[… ${count} earlier round${count === 1 ? "" : "s"} omitted; see the main transcript …]`;
   const reserve = marker(rounds.length).length + 2;
   for (; index >= 0; index--) {
-    const block = full(rounds[index]);
+    const whole = full(rounds[index], false);
+    const block = used + whole.length + 2 <= budget - reserve ? whole : full(rounds[index], true);
     if (used + block.length + 2 > budget - reserve) break;
     blocks.unshift(block);
     used += block.length + 2;
