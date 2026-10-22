@@ -1,4 +1,4 @@
-# pi-btw-split changes (0.7.1-split.6)
+# pi-btw-split changes (0.7.1-split.7)
 
 Independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Maintenance, updates and support belong to this project; related-project links in the READMEs are comparisons and credits, not support destinations.
 Dated validations and measurements below are historical results from the configurations described, not current test counts, performance promises, or guarantees for other hosts. Current setup and development commands are in [README.md](README.md).
@@ -360,6 +360,26 @@ Install this package with `pi install git:github.com/yczheng-hit/pi-btw-split` o
 
 Rollback: in the installed checkout, inspect `git status` and preserve local changes, check out an earlier commit with `git switch --detach <commit>`, and run `/reload`. Return with `git switch main` and `/reload`. For a Git install, `pi install git:github.com/yczheng-hit/pi-btw-split@<commit>` pins a version instead.
 
+
+## Configurable snapshot size (split.7, 2026-10-21)
+
+`~/.pi/agent/btw.json` (under `PI_CODING_AGENT_DIR` when set):
+
+```json
+{ "snapshot": { "share": "50%", "maxTokens": "24k" } }
+```
+
+- `share`: part of the free window the snapshot may use. `0.5`, `50` and `"50%"` are the same.
+  Default 25%, clamped to 5–80%.
+- `maxTokens`: ceiling. `24000` or `"24k"`. Default 12k, clamped to 1.5k–200k.
+- `PI_BTW_SNAPSHOT_SHARE` / `PI_BTW_SNAPSHOT_MAX_TOKENS` override the file. Invalid values are ignored.
+- Read on every question, so edits apply to the next question without `/reload`.
+- The ceiling usually binds first: with a 1M window, 25% is already far above 12k. Raise `maxTokens`
+  to get a larger snapshot there.
+
+**Validated.** Parsing, env precedence, clamping and the budget formula are unit tested. The
+real-extension test runs in a temporary agent dir and checks that `share: "50%"` gives a larger
+snapshot within its budget, with one model call and no compaction. `npm test` 34/34, typecheck pass.
 
 ## Budgeted main-session snapshot (2026-10-21)
 

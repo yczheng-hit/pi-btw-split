@@ -132,6 +132,16 @@ test('main-session snapshot: existing compaction summary is trimmed by priority,
   assert.equal(computeSnapshotBudgetTokens({ contextWindow: 24000, reserveTokens: 16384, fixedTokens: 4600 }), 1016);
   assert.equal(computeSnapshotBudgetTokens({ contextWindow: 8000, reserveTokens: 16384 }), 500, 'No room: a minimal status snapshot');
   assert.equal(computeSnapshotBudgetTokens({}), 8000);
+  // Configurable share and ceiling.
+  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 200_000, reserveTokens: 16384, fixedTokens: 5000, share: 0.5, maxTokens: 50_000 }), 50000);
+  assert.equal(computeSnapshotBudgetTokens({ contextWindow: 64000, reserveTokens: 16384, fixedTokens: 5000, share: 0.5, maxTokens: 50_000 }), 20308);
+  const { context: { snapshotBudgetSettings } } = await loadExtension();
+  assert.deepEqual(snapshotBudgetSettings({}, {}), { share: 0.25, maxTokens: 12000 });
+  for (const share of [0.5, 50, '50%', '0.5']) assert.equal(snapshotBudgetSettings({ share }, {}).share, 0.5, String(share));
+  assert.equal(snapshotBudgetSettings({ maxTokens: '24k' }, {}).maxTokens, 24000);
+  assert.deepEqual(snapshotBudgetSettings({ share: 0.5, maxTokens: 24000 }, { PI_BTW_SNAPSHOT_SHARE: '30%', PI_BTW_SNAPSHOT_MAX_TOKENS: '16k' }), { share: 0.3, maxTokens: 16000 }, 'Env wins');
+  assert.deepEqual(snapshotBudgetSettings({ share: 'abc', maxTokens: -1 }, {}), { share: 0.25, maxTokens: 12000 }, 'Invalid values are ignored');
+  assert.deepEqual(snapshotBudgetSettings({ share: 0.99, maxTokens: 10 }, {}), { share: 0.8, maxTokens: 1500 }, 'Clamped');
 });
 
 test('BTW child settings: lean/full both inherit compaction settings without writing files', async () => {
@@ -201,7 +211,13 @@ test('real BTW session: budgeted snapshot by default, no compaction on a near-fu
   add({ type: 'compaction', summary: longSummary, firstKeptEntryId: entries.at(-2).id, tokensBefore: 100000 });
   for (const message of running) add({ type: 'message', message });
 
-  async function ask(mode) {
+  // A temporary agent dir: the user's real btw.json and settings must not change the result.
+  const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'btw-context-agent-'));
+  const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  async function ask(mode, btwConfig) {
+    if (btwConfig) await fs.writeFile(path.join(agentDir, 'btw.json'), JSON.stringify(btwConfig));
+    else await fs.rm(path.join(agentDir, 'btw.json'), { force: true });
     const commands = new Map(), events = new Map(), notices = [];
     extension({ registerCommand: (name, value) => commands.set(name, value), registerShortcut() {}, registerMessageRenderer() {},
       on: (name, value) => events.set(name, value), events: { emit() {} }, getThinkingLevel: () => 'off',
@@ -241,4 +257,14 @@ test('real BTW session: budgeted snapshot by default, no compaction on a near-fu
   assert.ok(full.calls.length > 1 || full.notices.some(n => n.level === 'error'),
     `Full mode compacts or overflows: ${full.calls.length} calls, ${JSON.stringify(full.notices)}`);
   if (process.env.PI_BTW_TEST_VERBOSE) console.log(JSON.stringify({ leanCalls: lean.calls.length, leanChars: request.length, fullCalls: full.calls.length, fullChars: full.calls.map(c => c.length) }));
+
+  // btw.json snapshot.share 50%: a bigger snapshot that still fits, still one call.
+  const half = await ask('lean', { snapshot: { share: '50%' } });
+  assert.equal(half.calls.length, 1, '50% share still answers without compaction');
+  const halfSnapshot = JSON.parse(half.calls[0].slice(0, half.calls[0].lastIndexOf('\n')))[0].content[0].text;
+  const halfBudget = context.computeSnapshotBudgetTokens({ contextWindow: 32000, reserveTokens: 16384, fixedTokens: context.estimateTextTokens('PARENT_PROMPT ' + 'p'.repeat(12000)) + context.estimateTextTokens(btw.BTW_SYSTEM_PROMPT) + context.BTW_TOOL_SCHEMA_TOKENS, share: 0.5 });
+  assert.ok(halfBudget > budget && context.estimateTextTokens(halfSnapshot) <= halfBudget);
+  assert.ok(context.estimateTextTokens(halfSnapshot) > context.estimateTextTokens(snapshotText), 'Larger share gives a larger snapshot');
+  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+  await fs.rm(agentDir, { recursive: true, force: true });
 });

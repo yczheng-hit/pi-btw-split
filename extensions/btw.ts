@@ -50,12 +50,14 @@ import {
   buildMainSessionSnapshot,
   computeSnapshotBudgetTokens,
   estimateTextTokens,
+  snapshotBudgetSettings,
   useFullMainContext,
 } from "./btw-context";
 import { getBtwUiResources, showBtwOverlay } from "./btw-persistent-overlay";
 import { NativeSurface } from "../native/surface.mjs";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 const BTW_MESSAGE_TYPE = "btw-note";
@@ -565,11 +567,22 @@ function isMainIdle(ctx: ExtensionCommandContext): boolean {
   }
 }
 
+/** `snapshot` settings from `<agentDir>/btw.json`; missing or invalid file means defaults. */
+function readBtwSnapshotConfig(agentDir: string): { share?: unknown; maxTokens?: unknown } {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(agentDir, "btw.json"), "utf8")) as { snapshot?: unknown };
+    return parsed?.snapshot && typeof parsed.snapshot === "object" ? (parsed.snapshot as { share?: unknown; maxTokens?: unknown }) : {};
+  } catch {
+    return {};
+  }
+}
+
 /** Snapshot budget for the BTW model: its window minus Pi's compaction reserve and the fixed prompt. */
 function getSnapshotBudgetTokens(ctx: ExtensionCommandContext, sessionModel: SessionModel | null): number {
+  const agentDir = getAgentDir();
   let reserveTokens = 16384;
   try {
-    if (sessionModel) reserveTokens = createBtwSettingsManager(ctx.cwd, getAgentDir()).getCompactionReserveTokens(sessionModel);
+    if (sessionModel) reserveTokens = createBtwSettingsManager(ctx.cwd, agentDir).getCompactionReserveTokens(sessionModel);
   } catch {}
   let systemPrompt = "";
   try {
@@ -579,6 +592,7 @@ function getSnapshotBudgetTokens(ctx: ExtensionCommandContext, sessionModel: Ses
     contextWindow: sessionModel?.contextWindow,
     reserveTokens,
     fixedTokens: estimateTextTokens(systemPrompt) + estimateTextTokens(BTW_SYSTEM_PROMPT) + BTW_TOOL_SCHEMA_TOKENS,
+    ...snapshotBudgetSettings(readBtwSnapshotConfig(agentDir)),
   });
 }
 

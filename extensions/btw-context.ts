@@ -63,22 +63,58 @@ export function estimateTextTokens(text: string): number {
   return Math.ceil(ascii / 4) + other;
 }
 
+/** Limits for the user overrides below. */
+const SNAPSHOT_SHARE_RANGE = [0.05, 0.8] as const;
+const SNAPSHOT_MAX_TOKENS_RANGE = [1500, 200000] as const;
+
+type SnapshotConfig = { share?: unknown; maxTokens?: unknown };
+
 /**
- * Snapshot budget: 25% of the context left after Pi's compaction reserve, the fixed prompt and the
- * question, between 1.5k and 12k tokens, and never more than what is left.
+ * Snapshot size settings. Sources, highest first: `PI_BTW_SNAPSHOT_SHARE` / `PI_BTW_SNAPSHOT_MAX_TOKENS`,
+ * then `snapshot.share` / `snapshot.maxTokens` in `~/.pi/agent/btw.json`, then the defaults.
+ * Share accepts `0.5`, `50` or `"50%"`; max tokens accepts `24000` or `"24k"`. Out-of-range values
+ * are clamped; invalid values are ignored.
+ */
+export function snapshotBudgetSettings(
+  config: SnapshotConfig = {},
+  env: NodeJS.ProcessEnv = process.env,
+): { share: number; maxTokens: number } {
+  const clamp = (value: number, [low, high]: readonly [number, number]) => Math.min(high, Math.max(low, value));
+  const parse = (raw: unknown, suffix: string, scale: number): number | undefined => {
+    if (raw === undefined || raw === null || raw === "") return undefined;
+    const text = String(raw).trim().toLowerCase();
+    const value = text.endsWith(suffix) ? Number(text.slice(0, -suffix.length)) * scale : Number(text);
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  };
+  const shareValue = parse(env.PI_BTW_SNAPSHOT_SHARE, "%", 0.01) ?? parse(config.share, "%", 0.01);
+  const maxValue = parse(env.PI_BTW_SNAPSHOT_MAX_TOKENS, "k", 1000) ?? parse(config.maxTokens, "k", 1000);
+  return {
+    share: shareValue === undefined ? BTW_SNAPSHOT_SHARE : clamp(shareValue > 1 ? shareValue / 100 : shareValue, SNAPSHOT_SHARE_RANGE),
+    maxTokens: maxValue === undefined ? BTW_SNAPSHOT_MAX_TOKENS : Math.floor(clamp(maxValue, SNAPSHOT_MAX_TOKENS_RANGE)),
+  };
+}
+
+/**
+ * Snapshot budget: a share (default 25%) of the context left after Pi's compaction reserve, the
+ * fixed prompt and the question, between 1.5k and a ceiling (default 12k), and never more than
+ * what is left.
  */
 export function computeSnapshotBudgetTokens(options: {
   contextWindow?: number;
   reserveTokens?: number;
   fixedTokens?: number;
+  share?: number;
+  maxTokens?: number;
 }): number {
+  const share = options.share ?? BTW_SNAPSHOT_SHARE;
+  const maxTokens = options.maxTokens ?? BTW_SNAPSHOT_MAX_TOKENS;
   const window = options.contextWindow ?? 0;
-  if (!(window > 0)) return BTW_SNAPSHOT_FALLBACK_TOKENS;
+  if (!(window > 0)) return Math.min(BTW_SNAPSHOT_FALLBACK_TOKENS, maxTokens);
   const available = window - (options.reserveTokens ?? 0) - (options.fixedTokens ?? 0) - BTW_QUESTION_RESERVE_TOKENS;
   // Already near the threshold without a snapshot: still say what the main session is doing.
   if (available <= BTW_SNAPSHOT_EMERGENCY_TOKENS) return BTW_SNAPSHOT_EMERGENCY_TOKENS;
-  const wanted = Math.max(BTW_SNAPSHOT_MIN_TOKENS, available * BTW_SNAPSHOT_SHARE);
-  return Math.floor(Math.min(available, BTW_SNAPSHOT_MAX_TOKENS, wanted));
+  const wanted = Math.max(BTW_SNAPSHOT_MIN_TOKENS, available * share);
+  return Math.floor(Math.min(available, maxTokens, wanted));
 }
 
 type Call = { n: number; id: string; name: string; args: string; status: "pending" | "ok" | "error"; error?: string };
