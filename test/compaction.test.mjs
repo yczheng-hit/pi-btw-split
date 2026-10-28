@@ -6,7 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hostDir, hostDependencyPath } from './host.mjs';
 
-test('lean BTW asks each question in a fresh child (no thread growth, no compaction) and hands back all exchanges', async () => {
+test('a long BTW conversation restarts from a fresh snapshot plus earlier exchanges before Pi has to compact, and hands back all exchanges', async () => {
   const { createJiti } = await import(pathToFileURL(hostDependencyPath('jiti', 'lib/jiti.mjs')));
   const jiti = createJiti(import.meta.url, { fsCache: false, alias: {
     '@earendil-works/pi-tui': hostDependencyPath('@earendil-works/pi-tui', 'dist/index.js'),
@@ -56,12 +56,15 @@ test('lean BTW asks each question in a fresh child (no thread growth, no compact
     assert.equal(requests.length, 1, 'Lean first question needs no compaction');
     assert.ok(requests[0].serialized.includes('main-session-snapshot'));
     for (let i = 2; i <= 6; i++) await commands.get('btw:ask').handler(`QUESTION_${i}`, ctx);
-    assert.ok(!requests.some(r => r.compact), 'Per-question children never grow into compaction');
+    assert.ok(!requests.some(r => r.compact), 'The conversation restarts before Pi compaction is needed');
     assert.equal(requests.length, 6, 'One model call per question');
+    assert.ok(requests[1].serialized.includes('QUESTION_1') && requests[1].serialized.includes('ANSWER_1 '), 'Follow-ups see earlier exchanges');
+    const restarts = requests.filter(r => r.serialized.includes('<btw-earlier-discussion'));
+    assert.ok(restarts.length >= 1, 'A restart carried the earlier exchanges');
     for (let i = 2; i <= 6; i++) {
       const request = requests[i - 1].serialized;
       assert.ok(request.includes(`QUESTION_${i}`) && request.includes('main-session-snapshot'));
-      for (let j = 1; j < i; j++) assert.ok(!request.includes(`QUESTION_${j}"`) && !request.includes(`ANSWER_${j} `), `Question ${i} excludes exchange ${j}`);
+      assert.ok(request.includes(`QUESTION_${i - 1}`), `Question ${i} still sees question ${i - 1}`);
     }
     assert.equal(branch.filter(e => e.customType === 'btw-thread-entry').length, 6);
     await commands.get('btw:inject').handler('', ctx);

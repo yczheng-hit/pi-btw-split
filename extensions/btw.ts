@@ -15,8 +15,10 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
   type ResourceLoader,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
+  Type,
   type AssistantMessage,
   type Message,
   isContextOverflow,
@@ -45,9 +47,15 @@ import {
 import { loadBtwExtensionResources, readBtwExtensionSources } from "./btw-extension-tools";
 import { createBtwSplitLayout } from "./btw-split-layout";
 import {
+  BTW_EARLIER_ACK_TEXT,
+  BTW_EARLIER_DISCUSSION_SHARE,
   BTW_SNAPSHOT_ACK_TEXT,
   BTW_TOOL_SCHEMA_TOKENS,
+  BTW_UPDATE_SHARE,
+  buildEarlierDiscussion,
   buildMainSessionSnapshot,
+  buildMainSessionUpdate,
+  collectMainSessionDelta,
   computeSnapshotBudgetTokens,
   estimateTextTokens,
   snapshotBudgetSettings,
@@ -57,7 +65,7 @@ import { getBtwUiResources, showBtwOverlay } from "./btw-persistent-overlay";
 import { NativeSurface } from "../native/surface.mjs";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const BTW_MESSAGE_TYPE = "btw-note";
@@ -191,7 +199,10 @@ type BtwOverlayWidthMode = "window" | "full";
 export const BTW_SYSTEM_PROMPT = [
   "You are having an aside conversation with the user, separate from their main working session.",
   "If main session messages are provided, they are for context only — that work is being handled by another agent.",
-  "A <main-session-snapshot> is a budgeted, partial view taken when this question was asked, not the full record: when something you need is missing (tool output, older history, omitted items), read or search the main transcript file it names before saying the main session has no such information.",
+  "A <main-session-snapshot> is a budgeted, partial view taken when this BTW conversation started, not the full record: when something you need is missing (tool output, older history, omitted items), read or search the main transcript file it names before saying the main session has no such information.",
+  "The main session keeps working while you talk, so that view ages. A later <main-session-update> (appended before a question, or returned by the main_session_update tool) is newer and wins over earlier context. If it makes one of your earlier answers outdated, say so plainly instead of building on it.",
+  "An update is background, not a request: answer the user's question that comes with it.",
+  "When main_session_update is available and the question depends on what the main session is doing now (its latest progress, results, or decisions), call it before answering; otherwise do not.",
   "If no main session messages are provided, treat this as a fully contextless tangent thread and rely only on the user's words plus your general instructions.",
   "Focus on answering the user's side questions, helping them think through ideas, or planning next steps.",
   "Do not act as if you need to continue unfinished work from the main session unless the user explicitly asks you to prepare something for injection back to it.",
@@ -314,12 +325,32 @@ type BtwSessionRuntime = {
   /** Main-session leaf and run state the seed snapshot was taken from; a change means the seed is stale. */
   seedLeafId: string | null;
   seedMainIdle: boolean;
-  /** A child answers one question; the next question starts a fresh child. */
+  /** Set by the first question. Until then a stale seed (e.g. prewarmed when the pane opened) is rebuilt. */
   used: boolean;
+  /** /btw:sync: append the main session's progress before the next question. */
+  syncRequested?: boolean;
+  /**
+   * Last point the conversation has seen of the main session (snapshot or appended update). Later main
+   * activity is appended as a <main-session-update>; earlier BTW turns are never rewritten.
+   */
+  sync: BtwSyncPoint;
+  /** Main context in this conversation: none (tangent), or a snapshot/update with its time. */
+  baseAt: number | null;
   abortPromise?: Promise<void>;
   promptQueue: Promise<void>;
   hasExtensions: boolean;
 };
+
+type BtwSyncPoint = { leafId: string | null; mainRunning: boolean; at: number };
+
+/**
+ * Restart the conversation (new snapshot + earlier BTW exchanges) once it fills this share of the room
+ * before Pi's auto-compaction (window minus reserve), so the next exchange still fits without compacting.
+ */
+const BTW_RESTART_CONTEXT_SHARE = 0.6;
+const BTW_UPDATE_TOOL = "main_session_update";
+/** Main-session messages BTW leaves out of its own view of the main session. */
+const BTW_HIDDEN_MAIN_TYPES: ReadonlySet<string> = new Set(["btw-note"]);
 
 type OverlayRuntime = {
   handle?: OverlayHandle;
@@ -606,8 +637,16 @@ function buildBtwSeedState(
   ctx: ExtensionCommandContext,
   mode: BtwThreadMode,
   sessionModel: SessionModel | null,
+  earlier: ReadonlyArray<{ question: string; answer: string }> = [],
+  restartReason?: string,
 ): Message[] {
   const messages: Message[] = [];
+  // A restarted conversation keeps its earlier exchanges (summarized to fit) so follow-ups still connect.
+  const totalBudget = getSnapshotBudgetTokens(ctx, sessionModel);
+  const earlierText = earlier.length > 0
+    ? buildEarlierDiscussion(earlier, { budgetTokens: Math.max(500, Math.floor(totalBudget * BTW_EARLIER_DISCUSSION_SHARE)), reason: restartReason })
+    : null;
+  const snapshotBudget = earlierText ? Math.max(500, totalBudget - estimateTextTokens(earlierText)) : totalBudget;
 
   if (mode === "contextual" || mode === "readonly") {
     let mainMessages: Message[];
@@ -637,7 +676,7 @@ function buildBtwSeedState(
       const snapshot = buildMainSessionSnapshot(mainMessages, {
         sessionFile: ctx.sessionManager.getSessionFile?.(),
         mainRunning: !isMainIdle(ctx),
-        budgetTokens: getSnapshotBudgetTokens(ctx, sessionModel),
+        budgetTokens: snapshotBudget,
       });
       if (snapshot) {
         messages.push(
@@ -647,8 +686,47 @@ function buildBtwSeedState(
       }
     }
   }
+  if (earlierText) {
+    messages.push(
+      { role: "user", content: [{ type: "text", text: earlierText }], timestamp: Date.now() },
+      createSyntheticAssistantMessage(BTW_EARLIER_ACK_TEXT, sessionModel),
+    );
+  }
 
   return messages;
+}
+
+/** `snapshot.auto` in `<agentDir>/btw.json`: append main-session updates before every question. */
+function readBtwAutosnap(agentDir: string = getAgentDir()): boolean {
+  const config = readBtwSnapshotConfig(agentDir) as { auto?: unknown };
+  return config.auto === true;
+}
+
+/** In-memory copy, re-read on session start/reload, so header refreshes do not touch the disk. */
+let btwAutosnapCache: boolean | null = null;
+function isBtwAutosnap(): boolean {
+  btwAutosnapCache ??= readBtwAutosnap();
+  return btwAutosnapCache;
+}
+
+function writeBtwAutosnap(enabled: boolean, agentDir: string = getAgentDir()): void {
+  const file = path.join(agentDir, "btw.json");
+  let config: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) config = parsed;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`Cannot update ${file}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const snapshot = config.snapshot && typeof config.snapshot === "object" && !Array.isArray(config.snapshot) ? { ...(config.snapshot as object) } : {};
+  config.snapshot = { ...snapshot, auto: enabled };
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+function formatClock(at: number): string {
+  const date = new Date(at);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 function formatToolPreview(value: unknown): string {
@@ -956,6 +1034,13 @@ function applyAssistantMessageToTranscript(
   }
 }
 
+/** The pane shows the question; an appended main-session update collapses to one line. */
+export function displayBtwPrompt(text: string): string {
+  const match = text.match(/^<main-session-update [^>]*rounds="(\d+)"[^>]*>[\s\S]*?<\/main-session-update>\n\n/);
+  if (!match) return text;
+  return `↻ main session synced\n${text.slice(match[0].length)}`;
+}
+
 function applyTranscriptEvent(state: BtwTranscriptState, event: AgentSessionEvent): void {
   switch (event.type) {
     case "turn_start": {
@@ -965,7 +1050,7 @@ function applyTranscriptEvent(state: BtwTranscriptState, event: AgentSessionEven
     case "message_start": {
       if (event.message.role === "user") {
         const turnId = ensureTranscriptTurnForUserMessage(state);
-        upsertUserMessageEntry(state, turnId, extractMessageText(event.message));
+        upsertUserMessageEntry(state, turnId, displayBtwPrompt(extractMessageText(event.message)));
         return;
       }
 
@@ -987,7 +1072,7 @@ function applyTranscriptEvent(state: BtwTranscriptState, event: AgentSessionEven
     case "message_end": {
       if (event.message.role === "user") {
         const turnId = ensureTranscriptTurnForUserMessage(state);
-        upsertUserMessageEntry(state, turnId, extractMessageText(event.message));
+        upsertUserMessageEntry(state, turnId, displayBtwPrompt(extractMessageText(event.message)));
         return;
       }
 
@@ -1322,6 +1407,8 @@ export const BTW_COMPOSER_COMMANDS = [
   { name: "btw:new", usage: "[question]", description: "fresh thread with main context" },
   { name: "btw:tangent", usage: "[question]", description: "contextless side thread" },
   { name: "btw:ask", usage: "[question]", description: "read-only thread (read/grep/find/ls)" },
+  { name: "btw:sync", usage: "", description: "append the main session's latest progress" },
+  { name: "btw:autosnap", usage: "[on|off]", description: "sync the main session before every question" },
   { name: "btw:clear", usage: "", description: "clear the thread and close BTW" },
   { name: "btw:inject", usage: "[instructions]", description: "hand the full thread to the main agent" },
   { name: "btw:summarize", usage: "[instructions]", description: "hand a summary to the main agent" },
@@ -1450,6 +1537,8 @@ class BtwOverlayComponent extends Container implements Focusable {
   private readonly keybindings: KeybindingsManager;
   /** Submitted prompts, most recent first; owned by the extension so it outlives this component. */
   getPromptHistory: () => readonly string[] = () => [];
+  /** "main context 14:02 · main +3 rounds since (/btw:sync)" etc. */
+  getBaseText: () => string = () => "";
   /** Same model as the main editor: -1 = not browsing, 0 = most recent. */
   private historyIndex = -1;
   private historyDraft: { value: string; cursor: number } | null = null;
@@ -1928,7 +2017,8 @@ class BtwOverlayComponent extends Container implements Focusable {
   }
 
   refresh(): void {
-    this.modeTextValue = `${getOverlayTitle(this.getMode())} · history kept · each question independent`;
+    const base = this.getBaseText();
+    this.modeTextValue = `${getOverlayTitle(this.getMode())}${base ? ` · ${base}` : ""}`;
     this.modeText.setText(this.modeTextValue);
     const entries = this.readTranscriptEntries();
     const exchanges = getCompletedExchangeCount(entries);
@@ -2487,6 +2577,7 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionCommandContext,
     mode: BtwThreadMode,
     settings: ResolvedBtwSettings,
+    restartReason?: string,
   ): Promise<BtwSessionRuntime> {
     if (!settings.model) {
       throw new Error(settings.fallbackReason || "No active model selected.");
@@ -2511,7 +2602,11 @@ export default function (pi: ExtensionAPI) {
     const sessionManager = SessionManager.inMemory(ctx.cwd);
     const seedLeafId = getMainLeafId(ctx);
     const seedMainIdle = isMainIdle(ctx);
-    const seedMessages = buildBtwSeedState(ctx, mode, settings.model);
+    // A child created while the thread already has exchanges (main branch switch, window full, model
+    // or thinking change, reload, failed request) carries them over so the conversation stays connected.
+    const earlier = pendingThread.map((entry) => ({ question: entry.question, answer: entry.answer }));
+    const seedMessages = buildBtwSeedState(ctx, mode, settings.model, earlier, restartReason);
+    const seedAt = Date.now();
 
     // The session manager is the source of provider context. Seed it before
     // creating the AgentSession so its initial context includes these messages.
@@ -2530,7 +2625,8 @@ export default function (pi: ExtensionAPI) {
       thinkingLevel: settings.thinkingLevel,
       // Extension sessions need a live registry for tools registered at startup
       // or later. Read-only sessions keep the structural built-in allowlist.
-      ...(extensionResources ? { noTools: "builtin" as const } : { tools: [...builtinTools] }),
+      ...(extensionResources ? { noTools: "builtin" as const } : { tools: [...builtinTools, ...(mode === "tangent" ? [] : [BTW_UPDATE_TOOL])] }),
+      ...(mode === "tangent" ? {} : { customTools: [createMainSessionUpdateTool(ctx)] }),
       resourceLoader: createBtwResourceLoader(
         ctx, () => childSession?.getActiveToolNames() ?? builtinTools, [BTW_SYSTEM_PROMPT], extensionResources,
       ),
@@ -2544,7 +2640,7 @@ export default function (pi: ExtensionAPI) {
           throw new Error(extensionsResult.errors.map((error) => `${error.path}: ${error.error}`).join("\n"));
         }
         const collectToolNames = () => {
-          const builtinNames = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"]);
+          const builtinNames = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "powershell", BTW_UPDATE_TOOL]);
           const extensionNames = new Set<string>();
           for (const extension of extensionsResult.extensions) {
             for (const name of extension.tools.keys()) {
@@ -2556,7 +2652,7 @@ export default function (pi: ExtensionAPI) {
           }
           return [...extensionNames];
         };
-        session.setActiveToolsByName([...builtinTools, ...collectToolNames()]);
+        session.setActiveToolsByName([...builtinTools, ...(mode === "tangent" ? [] : [BTW_UPDATE_TOOL]), ...collectToolNames()]);
         const startupErrors: string[] = [];
         let starting = true;
         await session.bindExtensions({
@@ -2579,7 +2675,95 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    return { session, mode, subscriptions: new Set(), seedLeafId, seedMainIdle, used: false, promptQueue: Promise.resolve(), hasExtensions };
+    const sync: BtwSyncPoint = { leafId: seedLeafId, mainRunning: !seedMainIdle, at: seedAt };
+    const baseAt = mode === "tangent" || seedMessages.length === 0 ? null : seedAt;
+    return { session, mode, subscriptions: new Set(), seedLeafId, seedMainIdle, used: false, sync, baseAt, promptQueue: Promise.resolve(), hasExtensions };
+  }
+
+  /** Main-session activity since the conversation's sync point, or why it cannot be appended. */
+  function pendingMainUpdate(
+    ctx: ExtensionCommandContext,
+    runtime: BtwSessionRuntime,
+  ): { kind: "none" } | { kind: "diverged" } | { kind: "update"; text: string; rounds: number; leafId: string | null; mainRunning: boolean } {
+    const leafId = getMainLeafId(ctx);
+    const mainRunning = !isMainIdle(ctx);
+    const delta = collectMainSessionDelta(ctx.sessionManager.getEntries(), leafId, runtime.sync.leafId, BTW_HIDDEN_MAIN_TYPES);
+    if (delta.diverged) return { kind: "diverged" };
+    if (delta.messages.length === 0 && mainRunning === runtime.sync.mainRunning) return { kind: "none" };
+    const update = buildMainSessionUpdate(delta.messages, {
+      since: new Date(runtime.sync.at),
+      mainRunning,
+      previousMainRunning: runtime.sync.mainRunning,
+      budgetTokens: Math.max(500, Math.floor(getSnapshotBudgetTokens(ctx, runtime.session.model ?? null) * BTW_UPDATE_SHARE)),
+      sessionFile: ctx.sessionManager.getSessionFile?.(),
+    });
+    if (!update) return { kind: "none" };
+    return { kind: "update", text: update.text, rounds: delta.requests, leafId, mainRunning };
+  }
+
+  function markSynced(runtime: BtwSessionRuntime, leafId: string | null, mainRunning: boolean): void {
+    runtime.sync = { leafId, mainRunning, at: Date.now() };
+    runtime.baseAt = runtime.sync.at;
+  }
+
+  /** Lets the BTW model pull the main session's latest progress into the conversation itself. */
+  function createMainSessionUpdateTool(ctx: ExtensionCommandContext): ToolDefinition {
+    return {
+      name: BTW_UPDATE_TOOL,
+      label: "Main session update",
+      description:
+        "Read what the main Pi session has done since the last main-session snapshot or update in this conversation (new requests, replies, tool calls, run status). Use it when the question depends on the main session's current state. Read-only.",
+      promptSnippet: "main_session_update: fetch the main session's progress since the last snapshot/update",
+      parameters: Type.Object({}),
+      execute: async () => {
+        const runtime = activeBtwSession;
+        if (!runtime) return { content: [{ type: "text", text: "No BTW conversation is active." }], details: undefined };
+        const pending = pendingMainUpdate(ctx, runtime);
+        if (pending.kind === "diverged") {
+          return {
+            content: [{ type: "text", text: "The main session switched to another branch since this conversation's snapshot, so an incremental update is not possible. Tell the user; their next question will start from a fresh snapshot, or they can run /btw:sync now." }],
+            details: undefined,
+          };
+        }
+        if (pending.kind === "none") {
+          return { content: [{ type: "text", text: `No new main-session activity since ${new Date(runtime.sync.at).toISOString()}. Main status: ${runtime.sync.mainRunning ? "running" : "idle"}.` }], details: undefined };
+        }
+        markSynced(runtime, pending.leafId, pending.mainRunning);
+        syncUi(ctx);
+        return { content: [{ type: "text", text: pending.text }], details: undefined };
+      },
+    };
+  }
+
+  /** Header text: how current the main-session context in this BTW conversation is. */
+  let baseTextCache: { key: string; text: string } | null = null;
+  function describeBtwBase(): string {
+    if (pendingMode === "tangent") return "no main context";
+    const ctx = lastUiContext;
+    const runtime = activeBtwSession;
+    const auto = isBtwAutosnap() ? " · autosnap" : "";
+    if (!runtime || runtime.baseAt === null || !runtime.used || !ctx) return `main context: latest on next question${auto}`;
+    let leafId: string | null = null;
+    try {
+      leafId = ctx.sessionManager.getLeafId() ?? null;
+    } catch {}
+    // Refreshes run per streamed token: walk the main tree only when the leaf or sync point moved.
+    const key = `${leafId}|${runtime.sync.leafId}|${runtime.sync.at}|${runtime.syncRequested ? 1 : 0}|${auto}`;
+    if (baseTextCache?.key === key) return baseTextCache.text;
+    let behind = "";
+    try {
+      const delta = collectMainSessionDelta(ctx.sessionManager.getEntries(), leafId, runtime.sync.leafId, BTW_HIDDEN_MAIN_TYPES);
+      behind = delta.diverged
+        ? " · main switched branch, refreshes on next question"
+        : runtime.syncRequested
+          ? " · syncs with next question"
+          : delta.requests > 0
+            ? ` · main +${delta.requests} round${delta.requests === 1 ? "" : "s"} since (/btw:sync)`
+            : delta.messages.length > 0 ? " · main progressed since (/btw:sync)" : " · up to date";
+    } catch {}
+    const text = `main context ${formatClock(runtime.baseAt)}${behind}${auto}`;
+    baseTextCache = { key, text };
+    return text;
   }
 
   function ensureBtwSession(ctx: ExtensionCommandContext, mode: BtwThreadMode): Promise<BtwSessionRuntime | null> {
@@ -2602,21 +2786,34 @@ export default function (pi: ExtensionAPI) {
       return null;
     }
 
-    // Reuse only an unused child whose seed still matches the main session (e.g. one prewarmed
-    // when the pane opened). Each question otherwise gets a fresh child with the latest snapshot.
-    if (
-      activeBtwSession?.mode === mode &&
-      !activeBtwSession.used &&
-      activeBtwSession.seedLeafId === getMainLeafId(ctx) &&
-      activeBtwSession.seedMainIdle === isMainIdle(ctx)
-    ) {
-      return activeBtwSession;
+    // One child carries the whole BTW conversation; later main activity is appended, never swapped in.
+    // An unused child (e.g. prewarmed when the pane opened) is rebuilt if its seed went stale. A used
+    // one is restarted (fresh snapshot + earlier exchanges) only when the main session switched branch
+    // or the conversation is close to filling the window.
+    let restartReason: string | undefined;
+    if (activeBtwSession?.mode === mode) {
+      const current = activeBtwSession;
+      if (!current.used) {
+        if (current.seedLeafId === getMainLeafId(ctx) && current.seedMainIdle === isMainIdle(ctx)) return current;
+      } else if (mode === "tangent") {
+        if (!isNearlyFull(ctx, current)) return current;
+        restartReason = "restarted because the conversation was filling the context window";
+      } else {
+        const delta = collectMainSessionDelta(ctx.sessionManager.getEntries(), getMainLeafId(ctx), current.sync.leafId, BTW_HIDDEN_MAIN_TYPES);
+        if (!delta.diverged && !isNearlyFull(ctx, current)) return current;
+        restartReason = delta.diverged
+          ? "the main session has since switched to another branch"
+          : "restarted because the conversation was filling the context window";
+      }
     }
 
     await disposeBtwSession();
     if (generation !== btwLifecycleGeneration) return null;
     try {
-      const created = await createBtwSubSession(ctx, mode, settings);
+      const created = await createBtwSubSession(ctx, mode, settings, restartReason);
+      if (restartReason && pendingThread.length > 0) {
+        setOverlayStatus(restartReason.startsWith("the main") ? "Main session switched branch: BTW restarted from a fresh snapshot, earlier exchanges kept." : "BTW conversation was filling the window: restarted from a fresh snapshot, earlier exchanges kept.", ctx);
+      }
       if (generation !== btwLifecycleGeneration) {
         await requestBtwSessionAbort(created);
         await disposeChildSession(created.session, created.hasExtensions);
@@ -2631,6 +2828,22 @@ export default function (pi: ExtensionAPI) {
       return null;
     }
     return activeBtwSession;
+  }
+
+  function isNearlyFull(ctx: ExtensionCommandContext, runtime: BtwSessionRuntime): boolean {
+    try {
+      const usage = runtime.session.getContextUsage();
+      if (!usage || usage.tokens === null || !(usage.contextWindow > 0)) return false;
+      let reserve = 16384;
+      try {
+        const model = runtime.session.model;
+        if (model) reserve = createBtwSettingsManager(ctx.cwd, getAgentDir()).getCompactionReserveTokens(model);
+      } catch {}
+      const room = Math.max(usage.contextWindow * 0.5, usage.contextWindow - reserve);
+      return usage.tokens >= room * BTW_RESTART_CONTEXT_SHARE;
+    } catch {
+      return false;
+    }
   }
 
   function useNativeSurface(): boolean {
@@ -2687,6 +2900,7 @@ export default function (pi: ExtensionAPI) {
             () => { void surface.pane.zoom().catch((error) => notify(ctx, String(error), "error")); },
             geometry, true);
           component.getPromptHistory = () => promptHistory;
+          component.getBaseText = describeBtwBase;
           component.setDraft(overlayDraft);
           return component;
         },
@@ -2793,6 +3007,7 @@ export default function (pi: ExtensionAPI) {
           splitLayout.bindOverlay(overlay);
           overlay.focused = runtime.handle?.isFocused() ?? true;
           overlay.getPromptHistory = () => promptHistory;
+          overlay.getBaseText = describeBtwBase;
           overlay.setDraft(overlayDraft);
           runtime.setDraft = (value) => {
             overlay.setDraft(value);
@@ -2909,6 +3124,56 @@ export default function (pi: ExtensionAPI) {
       }
 
       await runBtw(ctx, question, save, "readonly");
+      return true;
+    }
+
+    if (name === "btw:sync") {
+      if (pendingMode === "tangent") {
+        notify(ctx, "This is a tangent thread without main-session context; /btw:new starts one with it.", "info");
+        return true;
+      }
+      const runtime = activeBtwSession;
+      if (!runtime?.used) {
+        setOverlayStatus("The next question reads the latest main session.", ctx);
+        notify(ctx, "The next question reads the latest main session.", "info");
+        return true;
+      }
+      const pending = pendingMainUpdate(ctx, runtime);
+      if (pending.kind === "diverged") {
+        // Cannot append across a branch switch: restart from a fresh snapshot with the earlier exchanges.
+        await disposeBtwSession();
+        setOverlayStatus("Main session switched branch: the next question starts from a fresh snapshot, earlier exchanges kept.", ctx);
+      } else if (pending.kind === "none") {
+        setOverlayStatus("Already up to date with the main session.", ctx);
+      } else {
+        runtime.syncRequested = true;
+        setOverlayStatus("Main-session progress will be added before your next question.", ctx);
+      }
+      syncUi(ctx);
+      return true;
+    }
+
+    if (name === "btw:autosnap") {
+      const value = trimmedArgs.toLowerCase();
+      if (value && value !== "on" && value !== "off") {
+        notify(ctx, "Usage: /btw:autosnap [on|off]", "info");
+        return true;
+      }
+      if (value) {
+        try {
+          writeBtwAutosnap(value === "on");
+        } catch (error) {
+          notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          return true;
+        }
+        btwAutosnapCache = value === "on";
+      }
+      const message = isBtwAutosnap()
+        ? "BTW autosnap is on: the main session's latest progress is added before every question."
+        : "BTW autosnap is off: use /btw:sync, or BTW reads main_session_update when it needs to.";
+      setOverlayStatus(message, ctx);
+      notify(ctx, message, "info");
+      syncUi(ctx);
       return true;
     }
 
@@ -3121,6 +3386,7 @@ export default function (pi: ExtensionAPI) {
     promptHistory = [];
     lastUiContext = ctx;
     overlayStatus = null;
+    btwAutosnapCache = null;
 
     const branch = ctx.sessionManager.getBranch();
     let lastResetIndex = -1;
@@ -3327,12 +3593,22 @@ export default function (pi: ExtensionAPI) {
     }
 
     sessionRuntime.abortPromise = undefined;
+    // Autosnap (or an explicit /btw:sync queued earlier): append the main session's progress before the question.
+    let promptText = question;
+    if (sessionRuntime.used && sessionRuntime.mode !== "tangent" && (isBtwAutosnap() || sessionRuntime.syncRequested)) {
+      const pending = pendingMainUpdate(ctx, sessionRuntime);
+      if (pending.kind === "update") {
+        promptText = `${pending.text}\n\n${question}`;
+        markSynced(sessionRuntime, pending.leafId, pending.mainRunning);
+      }
+    }
+    sessionRuntime.syncRequested = false;
     sessionRuntime.used = true;
     setOverlayStatus("⏳ streaming...", ctx);
     await ensureOverlay(ctx);
 
     try {
-      await session.prompt(question, { source: "extension" });
+      await session.prompt(promptText, { source: "extension" });
       if (!isCurrentGeneration()) {
         return;
       }
@@ -3391,7 +3667,7 @@ export default function (pi: ExtensionAPI) {
         notify(ctx, "BTW note queued to save after the current turn finishes.", "info");
         setOverlayStatus("BTW note queued to save after the current turn finishes.", ctx);
       } else {
-        setOverlayStatus("Ready for a follow-up. Next question reads the latest main session.", ctx);
+        setOverlayStatus("Ready for a follow-up.", ctx);
       }
     } catch (error) {
       if (!isCurrentGeneration()) {
@@ -3511,6 +3787,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_settled", async (_event, ctx) => {
     if (pendingHandoff) await checkPendingHandoff(ctx);
+    if (overlayRuntime) overlayRuntime.refresh?.();
+  });
+
+  // Keep the "main +N rounds since" header current while the pane is open.
+  pi.on("turn_end", async () => {
+    if (overlayRuntime) overlayRuntime.refresh?.();
   });
   pi.registerMessageRenderer(BTW_MESSAGE_TYPE, (message, { expanded }, theme) => {
     const details = message.details as BtwDetails | undefined;
@@ -3635,6 +3917,20 @@ export default function (pi: ExtensionAPI) {
     description: "Start a fresh BTW thread with main-session context. Optionally ask the first question immediately.",
     handler: async (args, ctx) => {
       await dispatchBtwCommand("btw:new", args, ctx);
+    },
+  });
+
+  pi.registerCommand("btw:sync", {
+    description: "Add the main session's progress since the last snapshot to the BTW conversation (with the next question).",
+    handler: async (args, ctx) => {
+      await dispatchBtwCommand("btw:sync", args, ctx);
+    },
+  });
+
+  pi.registerCommand("btw:autosnap", {
+    description: "Show or set (on|off) whether BTW adds the main session's progress before every question.",
+    handler: async (args, ctx) => {
+      await dispatchBtwCommand("btw:autosnap", args, ctx);
     },
   });
 

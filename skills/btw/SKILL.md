@@ -29,6 +29,8 @@ Use these commands in your guidance to the user:
 /btw:tangent --save <question>
 /btw:ask <question>
 /btw:ask --save <question>
+/btw:sync
+/btw:autosnap [on|off]
 /btw:clear
 /btw:model [<provider> <model> <api> | clear]
 /btw:thinking [<level> | clear]

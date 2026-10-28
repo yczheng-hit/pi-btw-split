@@ -227,7 +227,7 @@ test('real extension uses a separate authenticated surface; reuse, draft, shortc
     await waitFrame(lines => lines.some(line => stripTerminalSequences(line).includes('离线回答 1')));
     assert.equal(requests.length, 1, 'Repeated Enter with an empty composer never duplicates a request');
     assert.equal(mainWidgetWrites, mainUpdatesBeforePrompt, 'Native stream/input must not request a main Pi widget repaint');
-    assert.deepEqual(requests[0].tools.sort(), ['find', 'grep', 'ls', 'read']);
+    assert.deepEqual(requests[0].tools.sort(), ['find', 'grep', 'ls', 'main_session_update', 'read']);
     const firstContext = JSON.stringify(requests[0].context.messages);
     assert.ok(firstContext.includes('main-session-snapshot') && firstContext.includes('MAIN_SEED_ONLY'), 'Budgeted main-session snapshot');
     assert.equal(savedEntries.filter(e => e.data?.question === '只读问题').length, 1);
@@ -257,7 +257,7 @@ test('real extension uses a separate authenticated surface; reuse, draft, shortc
     await waitFrame(lines => lines.some(line => stripTerminalSequences(line).includes('2 exchanges')) && lines.some(line => stripTerminalSequences(line).includes('离线回答 1')));
     const secondContext = JSON.stringify(requests[1].context.messages);
     assert.ok(secondContext.includes('第二问') && secondContext.includes('MAIN_SEED_ONLY'), 'Second question gets a fresh main-session snapshot');
-    assert.ok(!secondContext.includes('只读问题') && !secondContext.includes('离线回答 1'), 'Earlier BTW exchanges stay out of the model input');
+    assert.ok(secondContext.includes('<btw-earlier-discussion') && secondContext.includes('只读问题') && secondContext.includes('离线回答 1'), 'A rebuilt child carries the earlier BTW exchanges');
     const resetsBeforeHandoff = savedEntries.filter(e => e.type === 'btw-thread-reset').length;
     input('/inj'); input('\r'); // unique partial command runs /btw:inject (user-reported /summ case)
     const handbackDeadline = Date.now() + 2000;

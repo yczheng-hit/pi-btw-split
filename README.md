@@ -4,7 +4,7 @@
 
 A [pi](https://github.com/earendil-works/pi-mono) extension that adds `/btw`: a side conversation that runs while the main agent keeps working. In [Herdr](https://herdr.dev) it opens in a native right-hand pane; elsewhere it opens as a 60/40 split inside Pi.
 
-This project is independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Version: `0.7.1-split.9`. Historical Linux validation covered Pi 1.0.4 and 1.2.0 with Herdr 0.9.3. Native macOS validation covers arm64, Pi 1.2.0, Node 24.20 and Herdr client/server 0.9.1; these results are not a guarantee for every host or future version.
+This project is independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Version: `0.7.1-split.10`. Historical Linux validation covered Pi 1.0.4 and 1.2.0 with Herdr 0.9.3. Native macOS validation covers arm64, Pi 1.2.0, Node 24.20 and Herdr client/server 0.9.1; these results are not a guarantee for every host or future version.
 
 Use [this repository's issues](https://github.com/yczheng-hit/pi-btw-split/issues) for support and bug reports, and this project's own history for updates and rollback. The related projects below are comparisons and credits, not maintenance destinations.
 
@@ -26,7 +26,7 @@ The agent checks prerequisites, installs the package, registers the Herdr pane p
 | Where the side chat appears | Centered overlay over the main session | New Herdr pane | Herdr: native right-hand pane. Elsewhere: 60/40 split inside Pi |
 | Side-chat process | Sub-session inside the parent Pi | A second, full Pi process (`herdr agent start --kind pi`) | Sub-session inside the parent Pi; the Herdr pane is a small Node frontend over a local socket |
 | Needs Herdr | No | Yes (v0.7.4+) | No; Herdr 0.9.1+ on Linux or macOS for the native pane |
-| Context given to the side chat | Copy of the whole main branch | Static snapshot of the parent context; replays the exact system prompt to reuse the provider prompt cache | Each question: a fresh, budgeted main-session snapshot (current task and its tool progress, earlier rounds, the existing compaction summary; by default at most 60% of the free window, capped only by the main session's context window; set `snapshot.share` / `snapshot.maxTokens` in `~/.pi/agent/btw.json`) plus the main transcript path. Earlier BTW exchanges are shown in the pane but not sent to the model. `PI_BTW_CONTEXT=full` copies the whole main context |
+| Context given to the side chat | Copy of the whole main branch | Static snapshot of the parent context; replays the exact system prompt to reuse the provider prompt cache | One continuous conversation. It starts with a budgeted main-session snapshot (current task and its tool progress, earlier rounds, the existing compaction summary; by default at most 60% of the free window, capped only by the main session's context window; set `snapshot.share` / `snapshot.maxTokens` in `~/.pi/agent/btw.json`) plus the main transcript path. Later main progress is only appended (`/btw:sync`, `/btw:autosnap on`, or the model's `main_session_update` tool); earlier turns are never rewritten. `PI_BTW_CONTEXT=full` copies the whole main context |
 | Auto-compaction in the side chat | On (follows your Pi settings) | Pi default (runs a normal Pi process) | On (follows your Pi settings). Each question starts small, so compaction is rarely needed |
 | Modes | `/btw`, `/btw:tangent` (no context), `/btw:ask` (read-only) | One mode; tools set by config (`inherit/all/read-only/none`) | Same as upstream |
 | Back to the main agent | `/btw:inject`, `/btw:summarize`: sent as a user message, queued as follow-up when busy | `/btw merge <prompt>` from the side pane; waits for the parent to settle | Labelled `BTW → main` message, steered in at the next step when busy. Inject keeps the thread until delivery; summarize clears it as soon as the summary exists. Undelivered content is kept for resend |
@@ -95,10 +95,12 @@ Then follow steps 4–6 above. To try it without installing: `pi -e /path/to/pi-
 
 | Command | What it does |
 |---|---|
-| `/btw [--save] <question>` (alias `/side`) | Ask an independent side question with the latest main context; earlier BTW stays visible but is not sent. Works while the main agent is busy. `--save` also writes the exchange as a visible note in the main transcript |
+| `/btw [--save] <question>` (alias `/side`) | Ask in the current BTW conversation; follow-ups see earlier answers. Works while the main agent is busy. `--save` also writes the exchange as a visible note in the main transcript |
 | `/btw:new [question]` | Clear the thread and start a fresh one with main context |
 | `/btw:tangent [--save] <question>` | Thread with no main-session context |
-| `/btw:ask [--save] <question>` | Read-only thread: only `read`, `grep`, `find`, `ls` are available |
+| `/btw:ask [--save] <question>` | Read-only thread: only `read`, `grep`, `find`, `ls` (plus `main_session_update`) are available |
+| `/btw:sync` | Add what the main session did since the snapshot (or last update) to the conversation, together with your next question |
+| `/btw:autosnap [on\|off]` | Show or set automatic sync before every question. Saved as `snapshot.auto` in `~/.pi/agent/btw.json`; default off |
 | `/btw:inject [instructions]` | Send the full thread to the main agent. The thread is kept until the main session receives it; if delivery fails, run the command again to resend it |
 | `/btw:summarize [instructions]` | Summarize the thread (thinking off) and send the summary. The thread is cleared immediately once the summary exists; if delivery fails, run the command again to resend the saved summary without another model call |
 | `/btw:clear` | Close BTW and clear the thread |
@@ -122,7 +124,8 @@ Inside the BTW composer, short forms work (`/ask`, `/new`, `/summ`), Tab complet
 
 - BTW threads are saved as hidden session entries. They survive reloads and never enter the main agent's context. An unsubmitted draft is not saved to disk.
 - The BTW backend lives in the parent Pi. If the parent exits, the Herdr pane disconnects; the thread comes back when the session is reopened.
-- Every BTW question is answered by a fresh sub-session: the latest main-session snapshot (none for `/btw:tangent`) plus that question. Earlier BTW exchanges stay visible in the pane and go back with `/btw:inject` / `/btw:summarize`, but are not model input. To build on an earlier answer, quote the part you need.
+- A BTW thread is one conversation: follow-ups see earlier questions and answers. The main-session snapshot is taken when it starts (none for `/btw:tangent`). When the main session moves on, the pane header shows it (`main context 14:02 · main +3 rounds since (/btw:sync)`); nothing changes under you until you sync. `/btw:sync` or autosnap appends a `<main-session-update>` before your next question (the pane shows `↻ main session synced`); the model can also call `main_session_update` itself when a question is about the main session's current state.
+- The conversation restarts from a fresh snapshot only when an update cannot be appended (the main session switched branch, or BTW model/thinking changed, or after a reload) or when it reaches about 60% of the room before Pi would compact it. The restarted conversation gets the earlier exchanges (summarized to fit) so follow-ups still connect.
 - If a single question still overflows the model window after Pi's compaction, BTW reports the error and suggests `/btw:summarize` or `/btw:new`.
 - In-Pi split mode needs fullscreen at ≥120 columns and ≥14 rows; smaller terminals get a centered window.
 
@@ -133,7 +136,7 @@ Inside the BTW composer, short forms work (`/ask`, `/new`, `/summ`), Tab complet
 | `PI_BTW_SURFACE=internal` | Always use the in-Pi split, even inside Herdr |
 | `PI_BTW_CONTEXT=full` | Copy the whole main context into BTW (upstream behavior). Compaction still follows your Pi settings |
 | `PI_BTW_FOCUS_KEYS` | Comma-separated focus-switch keys; replaces the defaults |
-| `~/.pi/agent/btw.json` | Opt-in extension tools for `/btw` and `/btw:tangent`, e.g. `{"extensions": ["npm:pi-web-access"]}`. A trusted project's `.pi/btw.json` replaces the list. `/btw:ask` ignores it |
+| `~/.pi/agent/btw.json` | `snapshot.auto` (autosnap, see `/btw:autosnap`), `snapshot.share` / `snapshot.maxTokens` (snapshot size). Opt-in extension tools for `/btw` and `/btw:tangent`, e.g. `{"extensions": ["npm:pi-web-access"]}`. A trusted project's `.pi/btw.json` replaces the list. `/btw:ask` ignores it |
 
 ## Development
 

@@ -34,8 +34,9 @@ async function readSources(path: string): Promise<string[] | undefined> {
     throw new Error(`Invalid BTW config ${path}: expected an object.`);
   }
   const fields = Object.keys(config);
-  if (fields.some((field) => field !== "extensions")) {
-    throw new Error(`Invalid BTW config ${path}: only the "extensions" key is supported.`);
+  // `snapshot` (size and autosnap settings) is read by btw.ts.
+  if (fields.some((field) => field !== "extensions" && field !== "snapshot")) {
+    throw new Error(`Invalid BTW config ${path}: only the "extensions" and "snapshot" keys are supported.`);
   }
   if (!("extensions" in config)) return undefined;
   if (!Array.isArray(config.extensions) || config.extensions.some((source) => typeof source !== "string" || !source.trim())) {

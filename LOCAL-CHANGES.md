@@ -1,4 +1,4 @@
-# pi-btw-split changes (0.7.1-split.9)
+# pi-btw-split changes (0.7.1-split.10)
 
 Independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Maintenance, updates and support belong to this project; related-project links in the READMEs are comparisons and credits, not support destinations.
 Dated validations and measurements below are historical results from the configurations described, not current test counts, performance promises, or guarantees for other hosts. Current setup and development commands are in [README.md](README.md).
@@ -360,6 +360,36 @@ Install this package with `pi install git:github.com/yczheng-hit/pi-btw-split` o
 
 Rollback: in the installed checkout, inspect `git status` and preserve local changes, check out an earlier commit with `git switch --detach <commit>`, and run `/reload`. Return with `git switch main` and `/reload`. For a Git install, `pi install git:github.com/yczheng-hit/pi-btw-split@<commit>` pins a version instead.
 
+
+## One continuous BTW conversation, main progress only appended (split.10, 2026-10-23)
+
+Replaces "each question independent" (2026-10-20). The main session changing under an open BTW
+conversation no longer changes what BTW sees mid-conversation.
+
+- One child session carries the thread. The `<main-session-snapshot>` is taken when it starts;
+  BTW questions and answers stay in the model input, and earlier turns are never rewritten
+  (provider prompt cache stays valid).
+- Later main progress is appended as `<main-session-update since=… main-status=… rounds=…>`
+  (new requests, replies, tool calls and status since the last sync point; no raw tool output;
+  at most 25% of the snapshot budget), in three ways:
+  - `/btw:sync`: added together with the next question;
+  - `/btw:autosnap on|off`: before every question; `snapshot.auto` in `~/.pi/agent/btw.json`, default off;
+  - `main_session_update` tool (not in `/btw:tangent`; also in `/btw:ask`): the model pulls it when a
+    question depends on the main session's current state.
+  The pane shows the question with one line `↻ main session synced`; `/btw:inject` hands back
+  questions and answers, not updates.
+- Header: `main context 14:02 · main +3 rounds since (/btw:sync)` / `· up to date` / `· autosnap`.
+- Restart (fresh snapshot + `<btw-earlier-discussion>` with earlier exchanges, at most 25% of the
+  budget, newest kept whole): main session switched branch (the sync point is no longer an ancestor),
+  BTW model/thinking change, reload, or the conversation reaching 60% of the room before Pi's
+  auto-compaction (window minus reserve), so Pi compaction is normally not needed.
+- An unused prewarmed child is still rebuilt if its seed went stale; the first question never compacts.
+
+**Validated.** `npm test` (38) and typecheck. `test/fresh-context.test.mjs` drives the real extension
+through a real AgentSession: follow-ups keep earlier turns as an unchanged prefix, no update while
+autosnap is off, `/btw:sync` appends once, autosnap appends with running status, the tool returns
+the new progress, a branch switch restarts with earlier exchanges, tangent has no context.
+`test/compaction.test.mjs`: a growing conversation restarts before Pi compaction.
 
 ## Up/Down = prompt history, like the main editor (split.9, 2026-10-22)
 

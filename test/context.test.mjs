@@ -68,6 +68,44 @@ test('main-session snapshot: task, progress, earlier rounds and summary; no hidd
   assert.equal(useFullMainContext({ PI_BTW_CONTEXT: 'full' }), true);
 });
 
+test('main-session update: delta since the sync point, appended text, divergence and earlier discussion', async () => {
+  const { context } = await loadExtension();
+  const entry = (id, parentId, message) => ({ type: 'message', id, parentId, message });
+  const entries = [
+    entry('a', null, user('ROUND_1')), entry('b', 'a', assistant([{ type: 'text', text: 'ANSWER_1' }])),
+    entry('c', 'b', user('ROUND_2')),
+    entry('d', 'c', assistant([{ type: 'toolCall', id: 'x1', name: 'bash', arguments: { command: 'make' } }])),
+    { type: 'custom_message', id: 'n', parentId: 'd', customType: 'btw-note', content: 'BTW_NOTE', display: true },
+    { type: 'message', id: 'e', parentId: 'n', message: toolResult('x1', 'BUILD_OK') },
+    entry('f', 'e', assistant([{ type: 'text', text: 'ANSWER_2' }])),
+    entry('g', 'b', user('OTHER_BRANCH')),
+  ];
+  const hidden = new Set(['btw-note']);
+  assert.deepEqual(context.collectMainSessionDelta(entries, 'b', 'b', hidden), { diverged: false, messages: [], requests: 0 });
+  const delta = context.collectMainSessionDelta(entries, 'f', 'b', hidden);
+  assert.equal(delta.diverged, false);
+  assert.equal(delta.requests, 1);
+  assert.equal(delta.messages.length, 4, 'Hidden BTW notes are skipped');
+  assert.equal(context.collectMainSessionDelta(entries, 'f', 'g', hidden).diverged, true, 'Sync point off the current branch');
+  assert.equal(context.collectMainSessionDelta(entries, 'f', 'missing', hidden).diverged, true);
+
+  // A tool result whose call came before the sync point still shows up.
+  const partial = context.collectMainSessionDelta(entries, 'f', 'd', hidden);
+  const update = context.buildMainSessionUpdate(partial.messages, { since: new Date(0), mainRunning: false, previousMainRunning: true, now: new Date(1000) });
+  assert.ok(update.text.startsWith('<main-session-update ') && update.text.endsWith('</main-session-update>'));
+  assert.ok(update.text.includes('bash(called before the previous update) [x1] → ok') && update.text.includes('ANSWER_2') && update.text.includes('main-status="idle"'));
+  assert.ok(!update.text.includes('ROUND_1') && !update.text.includes('BTW_NOTE') && !update.text.includes('BUILD_OK'), 'No raw tool output, like the snapshot');
+  assert.equal(context.buildMainSessionUpdate([], { since: new Date(0), mainRunning: false, previousMainRunning: false }), null, 'Nothing new');
+  assert.ok(context.buildMainSessionUpdate([], { since: new Date(0), mainRunning: true, previousMainRunning: false }).text.includes('running'), 'Status change alone is reported');
+  const big = context.buildMainSessionUpdate([user('BIG'), assistant([{ type: 'text', text: 'y'.repeat(200000) }])], { since: new Date(0), budgetTokens: 1000 });
+  assert.ok(big.tokens <= 1100, `Budgeted update: ${big.tokens}`);
+
+  const earlier = context.buildEarlierDiscussion([{ question: 'Q_OLD', answer: 'A_OLD' }, { question: 'Q_NEW', answer: 'z'.repeat(100000) }], { budgetTokens: 2000, reason: 'the main session has since switched to another branch' });
+  assert.ok(earlier.startsWith('<btw-earlier-discussion') && earlier.includes('Q_NEW') && earlier.includes('switched to another branch'));
+  assert.ok(Math.ceil(earlier.length / 4) <= 2200, 'Earlier discussion stays within its budget');
+  assert.equal(context.buildEarlierDiscussion([], { budgetTokens: 1000 }), null);
+});
+
 test('main-session snapshot: a long running task shows its recorded progress', async () => {
   const { context: { buildMainSessionSnapshot } } = await loadExtension();
   const call = (id, name, args) => ({ type: 'toolCall', id, name, arguments: args });

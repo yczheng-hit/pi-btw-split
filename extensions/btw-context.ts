@@ -1,11 +1,13 @@
 /**
- * Budgeted main-session snapshot for BTW.
+ * Budgeted main-session context for BTW.
  *
- * Each BTW question gets a fresh, deterministic, model-free view of the main session: its status, the
- * current task and the progress recorded so far, earlier finished rounds, and the latest compaction
- * summary Pi already produced. Tool output, thinking and system prompts stay in the transcript, which
- * BTW can read on demand. The snapshot fits a token budget derived from the BTW model, so a first
- * question never has to compact.
+ * A BTW conversation starts from a deterministic, model-free snapshot of the main session: its status,
+ * the current task and the progress recorded so far, earlier finished rounds, and the latest compaction
+ * summary Pi already produced. Later main-session activity is only ever appended as a
+ * <main-session-update> (on /btw:sync, autosnap, or the main_session_update tool), so earlier BTW turns
+ * keep the background they were answered against. Tool output, thinking and system prompts stay in the
+ * transcript, which BTW can read on demand. The snapshot fits a token budget derived from the BTW model,
+ * so a first question never has to compact.
  */
 
 /** Floor for the snapshot when the window allows it. */
@@ -20,6 +22,10 @@ export const BTW_SNAPSHOT_FALLBACK_TOKENS = 8000;
  * context window as `maxTokens`.
  */
 export const BTW_SNAPSHOT_SHARE = 0.6;
+/** Share of the snapshot budget one <main-session-update> may take. */
+export const BTW_UPDATE_SHARE = 0.25;
+/** Share of the seed budget for earlier BTW exchanges when the conversation is restarted. */
+export const BTW_EARLIER_DISCUSSION_SHARE = 0.25;
 /** Room kept for the question itself. */
 export const BTW_QUESTION_RESERVE_TOKENS = 2000;
 /** Rough size of the BTW tool schemas, which are not known before the child session exists. */
@@ -40,10 +46,13 @@ const RECENT_SHRUNK_CHARS = 150;
 const ARGS_CHARS = 160;
 const ERROR_CHARS = 200;
 const CONTINUED_REQUEST = "(Started before the latest compaction; see the compaction summary below.)";
+const CONTINUED_FROM_SYNC = "(Continues the task that was in progress at the previous snapshot or update.)";
 const MIN_CLIPPED_SECTION_CHARS = 300;
 
 export const BTW_SNAPSHOT_ACK_TEXT =
   "Understood. I have the main-session snapshot. It is partial: if something I need is missing, I will check the main transcript before concluding it does not exist.";
+export const BTW_EARLIER_ACK_TEXT =
+  "Understood. I have our earlier discussion; I will check it against the current main-session state before relying on it.";
 
 /** `PI_BTW_CONTEXT=full` restores the old behavior: inherit the whole main-session context. */
 export function useFullMainContext(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -180,7 +189,10 @@ function summarizeArgs(args: unknown): string {
  * Split the main context into rounds. A user message or BTW handoff starts a round, except a user
  * message sent while the round is still working (a steer), which joins it as a follow-up.
  */
-function collectRounds(messages: readonly unknown[]): { rounds: Round[]; compactionSummary?: string; branchSummaries: string[] } {
+function collectRounds(
+  messages: readonly unknown[],
+  options: { continued?: string; orphanResults?: boolean } = {},
+): { rounds: Round[]; compactionSummary?: string; branchSummaries: string[] } {
   const rounds: Round[] = [];
   const callsById = new Map<string, Call>();
   const branchSummaries: string[] = [];
@@ -189,14 +201,14 @@ function collectRounds(messages: readonly unknown[]): { rounds: Round[]; compact
   const startRound = (request: string) => rounds.push({ requests: [request], items: [], awaiting: false, calls: [] });
   // Work with no request before it: the request was compacted away mid-turn.
   const roundForWork = () => {
-    if (!current()) startRound(CONTINUED_REQUEST);
+    if (!current()) startRound(options.continued ?? CONTINUED_REQUEST);
     return current()!;
   };
 
   for (const raw of messages) {
     const message = raw as {
       role?: string; content?: unknown; customType?: string; summary?: string; stopReason?: string;
-      toolCallId?: string; isError?: boolean; command?: string; exitCode?: number; cancelled?: boolean; excludeFromContext?: boolean;
+      toolCallId?: string; toolName?: string; isError?: boolean; command?: string; exitCode?: number; cancelled?: boolean; excludeFromContext?: boolean;
     };
     switch (message?.role) {
       case "user": {
@@ -230,7 +242,14 @@ function collectRounds(messages: readonly unknown[]): { rounds: Round[]; compact
         break;
       }
       case "toolResult": {
-        const call = message.toolCallId ? callsById.get(message.toolCallId) : undefined;
+        let call = message.toolCallId ? callsById.get(message.toolCallId) : undefined;
+        if (!call && options.orphanResults) {
+          // Result of a call made before the previous sync point.
+          const round = roundForWork();
+          call = { n: round.calls.length + 1, id: message.toolCallId ?? "", name: message.toolName ?? "tool", args: "called before the previous update", status: "pending" };
+          round.calls.push(call);
+          round.items.push({ kind: "call", call });
+        }
         if (!call) break;
         call.status = message.isError ? "error" : "ok";
         if (message.isError) {
@@ -366,7 +385,11 @@ function finalAnswer(round: Round): string {
   return texts.map((item) => item.text).join("\n\n");
 }
 
-function renderRecent(rounds: Round[], budget: number): Rendered {
+function renderRecent(
+  rounds: Round[],
+  budget: number,
+  marker = (count: number) => `[… ${count} earlier round${count === 1 ? "" : "s"} omitted; see the main transcript …]`,
+): Rendered {
   const blocks: string[] = [];
   let used = 0;
   let index = rounds.length - 1;
@@ -384,7 +407,6 @@ function renderRecent(rounds: Round[], budget: number): Rendered {
   };
   const short = (round: Round) =>
     `User: ${oneLine(round.requests[0] ?? "", RECENT_SHRUNK_CHARS)} → Assistant: ${oneLine(finalAnswer(round), RECENT_SHRUNK_CHARS) || "(no text answer)"}`;
-  const marker = (count: number) => `[… ${count} earlier round${count === 1 ? "" : "s"} omitted; see the main transcript …]`;
   const reserve = marker(rounds.length).length + 2;
   for (; index >= 0; index--) {
     const whole = full(rounds[index], false);
@@ -571,4 +593,170 @@ export function buildMainSessionSnapshot(
     sections: result.sections,
     omitted: result.omitted,
   };
+}
+
+/** Render against a token budget: start from 4 chars/token, then tighten until the estimate fits. */
+function fitToTokens(budgetTokens: number, render: (charBudget: number) => string, open: string, close: string): string {
+  let charBudget = budgetTokens * 4;
+  let text = render(charBudget);
+  for (let attempt = 0; attempt < 6 && estimateTextTokens(text) > budgetTokens; attempt++) {
+    charBudget = Math.floor((charBudget * budgetTokens) / estimateTextTokens(text) * 0.95);
+    text = render(charBudget);
+  }
+  while (estimateTextTokens(text) > budgetTokens && text.length > 200) {
+    const body = text.slice(open.length, text.length - close.length);
+    text = open + clipMiddle(body, Math.floor(body.length * 0.8)) + close;
+  }
+  return text;
+}
+
+export type MainSessionUpdate = { text: string; tokens: number; rounds: number };
+
+/**
+ * Main-session activity after a sync point, appended to a running BTW conversation. `messages` are the
+ * messages recorded after that point, oldest first; a round that was in progress continues here, and
+ * results of calls made before the point are listed on their own. Null when there is nothing to report.
+ */
+export function buildMainSessionUpdate(
+  messages: readonly unknown[],
+  options: { since: Date; mainRunning?: boolean; previousMainRunning?: boolean; budgetTokens?: number; sessionFile?: string; now?: Date },
+): MainSessionUpdate | null {
+  const { rounds, compactionSummary } = collectRounds(messages, { continued: CONTINUED_FROM_SYNC, orphanResults: true });
+  const mainRunning = options.mainRunning ?? false;
+  const statusChanged = options.previousMainRunning !== undefined && options.previousMainRunning !== mainRunning;
+  if (rounds.length === 0 && !statusChanged && !compactionSummary) return null;
+  const budgetTokens = options.budgetTokens ?? Math.floor(BTW_SNAPSHOT_FALLBACK_TOKENS * BTW_UPDATE_SHARE);
+  const latest = rounds[rounds.length - 1];
+
+  const lines: string[] = [];
+  for (const round of rounds) {
+    round.requests.forEach((request, index) => {
+      lines.push(`- ${index === 0 ? "User" : "User (follow-up)"}: ${request.replace(/\n/g, "\n  ")}`);
+    });
+    for (const item of round.items) {
+      lines.push(item.kind === "text" ? `- Assistant: ${item.text.replace(/\n/g, "\n  ")}` : formatCall(item.call, mainRunning));
+    }
+  }
+  const open = `<main-session-update since="${options.since.toISOString()}" generated-at="${(options.now ?? new Date()).toISOString()}" main-status="${mainRunning ? "running" : "idle"}" rounds="${rounds.length}">\n`;
+  const close = "\n</main-session-update>";
+  const intro = [
+    "What the main session recorded after the previous snapshot or update in this BTW conversation, oldest first. It adds to the earlier context; where they conflict, this is newer.",
+    mainRunning
+      ? "Main status: running. Work not yet written to the transcript is not shown."
+      : statusChanged ? "Main status: idle (it was running at the previous snapshot or update)." : "Main status: idle.",
+    ...(compactionSummary ? ["The main session compacted its context in this period; nothing earlier was lost from this conversation."] : []),
+    ...(options.sessionFile ? [`Tool output and thinking are left out; read or search the main transcript (JSONL) ${options.sessionFile} when you need them.`] : []),
+  ].join("\n");
+  const tail = mainRunning && latest?.awaiting
+    ? "- Now: still working. Text being generated and tools still running are not in the transcript yet."
+    : "";
+  const text = fitToTokens(budgetTokens, (charBudget) => {
+    const room = Math.max(200, charBudget - open.length - close.length - intro.length - tail.length - 4);
+    const body = lines.length === 0
+      ? "- No new requests, replies or tool calls."
+      : fitLines(
+        lines,
+        room,
+        [
+          (line) => (/^- (Assistant|User)/.test(line) ? clipMiddle(line, PROGRESS_TEXT_CHARS) : line),
+          (line) => (/^- (Assistant|User)/.test(line) ? clipMiddle(line, PROGRESS_TEXT_SHRUNK_CHARS) : line),
+          (line) => (/^- (Assistant|User)/.test(line) ? oneLine(line, PROGRESS_TEXT_TINY_CHARS) : line),
+        ],
+        PROGRESS_HEAD_ITEMS,
+      ).text;
+    return open + [intro, body, ...(tail ? [tail] : [])].join("\n") + close;
+  }, open, close);
+  return { text, tokens: estimateTextTokens(text), rounds: rounds.length };
+}
+
+/**
+ * Earlier BTW exchanges for a restarted BTW conversation (main session switched branch, model change,
+ * reload, failed request), newest kept whole when they fit. Null when there are none.
+ */
+export function buildEarlierDiscussion(
+  exchanges: ReadonlyArray<{ question: string; answer: string }>,
+  options: { budgetTokens: number; reason?: string },
+): string | null {
+  if (exchanges.length === 0) return null;
+  const rounds: Round[] = exchanges.map((exchange) => ({
+    requests: [exchange.question], items: [{ kind: "text", text: exchange.answer || "(no answer)" }], awaiting: false, calls: [],
+  }));
+  const open = `<btw-earlier-discussion exchanges="${exchanges.length}">\n`;
+  const close = "\n</btw-earlier-discussion>";
+  const intro = [
+    "Earlier questions and answers in this BTW conversation, kept so follow-ups still make sense.",
+    `They were answered against the main-session state at the time${options.reason ? ` (${options.reason})` : ""}; the main-session context above is newer, so check them against it before relying on them.`,
+  ].join(" ");
+  return fitToTokens(options.budgetTokens, (charBudget) => {
+    const room = Math.max(200, charBudget - open.length - close.length - intro.length - 2);
+    const body = renderRecent(rounds, room, (count) => `[… ${count} earlier exchange${count === 1 ? "" : "s"} omitted …]`).text;
+    return open + intro + "\n\n" + body + close;
+  }, open, close);
+}
+
+export type MainSessionDelta = {
+  /** The previous sync point is no longer on the main session's current branch. */
+  diverged: boolean;
+  /** Messages recorded after the sync point, oldest first, in buildSessionContext's shape. */
+  messages: unknown[];
+  /** New user requests (and BTW handoffs) among them. */
+  requests: number;
+};
+
+type SessionEntryLike = { id?: string; parentId?: string | null; type?: string; message?: unknown; customType?: string; content?: unknown; summary?: string };
+
+function entryToMessage(entry: SessionEntryLike, hiddenCustomTypes: ReadonlySet<string>): unknown | undefined {
+  switch (entry.type) {
+    case "message":
+      return entry.message;
+    case "custom_message":
+      return entry.customType && hiddenCustomTypes.has(entry.customType)
+        ? undefined
+        : { role: "custom", customType: entry.customType, content: entry.content };
+    case "compaction":
+      return { role: "compactionSummary", summary: entry.summary };
+    case "branch_summary":
+      return { role: "branchSummary", summary: entry.summary };
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Main-session entries on the current branch after `sinceLeafId` (null: the session was empty then).
+ * Walks parent links from `leafId`, so it works for any tree shape; `diverged` when the walk reaches
+ * the root without passing the sync point (the user switched branches with /tree, or forked).
+ */
+export function collectMainSessionDelta(
+  entries: readonly unknown[],
+  leafId: string | null,
+  sinceLeafId: string | null,
+  hiddenCustomTypes: ReadonlySet<string> = new Set(),
+): MainSessionDelta {
+  if (leafId === sinceLeafId) return { diverged: false, messages: [], requests: 0 };
+  const byId = new Map<string, SessionEntryLike>();
+  for (const raw of entries) {
+    const entry = raw as SessionEntryLike;
+    if (typeof entry?.id === "string") byId.set(entry.id, entry);
+  }
+  const path: SessionEntryLike[] = [];
+  let found = sinceLeafId === null;
+  for (let id = leafId, guard = 0; id && guard <= byId.size; guard++) {
+    if (id === sinceLeafId) { found = true; break; }
+    const entry = byId.get(id);
+    if (!entry) break;
+    path.push(entry);
+    id = entry.parentId ?? null;
+  }
+  if (!found) return { diverged: true, messages: [], requests: 0 };
+  const messages: unknown[] = [];
+  let requests = 0;
+  for (const entry of path.reverse()) {
+    const message = entryToMessage(entry, hiddenCustomTypes);
+    if (!message) continue;
+    messages.push(message);
+    const role = (message as { role?: string; customType?: string }).role;
+    if (role === "user" || (role === "custom" && (message as { customType?: string }).customType === "btw-handoff")) requests++;
+  }
+  return { diverged: false, messages, requests };
 }

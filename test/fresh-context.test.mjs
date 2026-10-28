@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hostDir, hostDependencyPath } from './host.mjs';
 
+let displayBtwPrompt;
 async function loadExtension() {
   const { createJiti } = await import(pathToFileURL(hostDependencyPath('jiti', 'lib/jiti.mjs')));
   const jiti = createJiti(import.meta.url, { fsCache: false, alias: {
@@ -13,10 +14,12 @@ async function loadExtension() {
     '@earendil-works/pi-coding-agent': path.join(hostDir, 'dist/index.js'),
     '@earendil-works/pi-ai': hostDependencyPath('@earendil-works/pi-ai', 'dist/index.js'),
   } });
-  return (await jiti.import('../extensions/btw.ts')).default;
+  const module = await jiti.import('../extensions/btw.ts');
+  displayBtwPrompt = module.displayBtwPrompt;
+  return module.default;
 }
 
-test('each contextual BTW question sees the latest main session, not old BTW answers', async () => {
+test('one BTW conversation: earlier turns kept, main progress only appended (sync, autosnap, tool, branch switch)', async () => {
   const extension = await loadExtension();
   const { initTheme, getThemeByName } = await import(pathToFileURL(path.join(hostDir, 'dist/modes/interactive/theme/theme.js')));
   const { createAssistantMessageEventStream } = await import(pathToFileURL(hostDependencyPath('@earendil-works/pi-ai', 'dist/index.js')));
@@ -27,11 +30,15 @@ test('each contextual BTW question sees the latest main session, not old BTW ans
   process.env.PI_CODING_AGENT_DIR = agentDir; delete process.env.PI_BTW_CONTEXT;
 
   const requests = [];
+  let callUpdateTool = false;
   const model = { provider: 'btw-fresh-test', id: 'fixture', name: 'Fixture', api: 'openai-completions', baseUrl: 'http://127.0.0.1:1', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 64000, maxTokens: 1024 };
   const provider = { baseUrl: model.baseUrl, api: model.api, apiKey: 'offline-fixture', models: [{ ...model }], streamSimple(model, context) {
     const serialized = JSON.stringify(context.messages);
     requests.push(serialized);
-    const message = { role: 'assistant', api: model.api, provider: model.provider, model: model.id, content: [{ type: 'text', text: `OLD_ANSWER_${requests.length}` }], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: Date.now() };
+    const last = context.messages[context.messages.length - 1];
+    const useTool = callUpdateTool && last?.role === 'user';
+    const content = useTool ? [{ type: 'toolCall', id: `upd${requests.length}`, name: 'main_session_update', arguments: {} }] : [{ type: 'text', text: `ANSWER_${requests.length}` }];
+    const message = { role: 'assistant', api: model.api, provider: model.provider, model: model.id, content, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: useTool ? 'toolUse' : 'stop', timestamp: Date.now() };
     const stream = createAssistantMessageEventStream();
     setTimeout(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); }, 5);
     return stream;
@@ -45,12 +52,12 @@ test('each contextual BTW question sees the latest main session, not old BTW ans
     sendUserMessage() {}, getAllTools: () => [], getCommands: () => [] });
   const mainEntries = [];
   let leafId = null;
-  const addMain = (role, text) => {
+  const addMain = (role, text, parentId = leafId) => {
     const id = `main-${mainEntries.length}`;
     const message = role === 'user'
       ? { role, content: [{ type: 'text', text }], timestamp: Date.now() }
       : { role, content: [{ type: 'text', text }], provider: 'main', model: 'main', api: 'openai-completions', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: Date.now() };
-    mainEntries.push({ type: 'message', id, parentId: leafId, timestamp: new Date().toISOString(), message });
+    mainEntries.push({ type: 'message', id, parentId, timestamp: new Date().toISOString(), message });
     leafId = id;
   };
   addMain('user', 'MAIN_BEFORE_FIRST_BTW');
@@ -63,35 +70,70 @@ test('each contextual BTW question sees the latest main session, not old BTW ans
 
   try {
     await events.get('session_start')({}, ctx);
-    await commands.get('btw').handler('OLD_BTW_QUESTION', ctx);
-    addMain('user', 'MAIN_AFTER_FIRST_BTW');
-    addMain('assistant', 'MAIN_AFTER_ANSWER');
-    await commands.get('btw').handler('NEW_BTW_QUESTION', ctx);
+    await commands.get('btw').handler('Q1', ctx);
+    addMain('user', 'MAIN_ROUND_2');
+    addMain('assistant', 'MAIN_ROUND_2_ANSWER');
+    await commands.get('btw').handler('Q2', ctx);
 
+    // Autosnap off (default): the same conversation continues, the main progress is not swapped in.
     assert.equal(requests.length, 2);
-    assert.ok(requests.every(request => request.includes('<main-session-snapshot ')));
-    assert.ok(requests[1].includes('MAIN_AFTER_FIRST_BTW') && requests[1].includes('MAIN_AFTER_ANSWER'), 'Second BTW sees the latest main session');
-    for (const old of ['OLD_BTW_QUESTION', 'OLD_ANSWER_1']) assert.ok(!requests[1].includes(old), `Second BTW must not include ${old}`);
-    assert.equal(branch.filter(e => e.customType === 'btw-thread-entry').length, 2, 'Visible BTW history keeps both exchanges');
-    assert.ok(requests[1].includes('main-status=\\"idle\\"'));
+    assert.ok(requests[1].includes('Q1') && requests[1].includes('ANSWER_1'), 'Second question keeps the first exchange');
+    assert.ok(requests[1].startsWith(requests[0].slice(0, -1)), 'Earlier turns are an unchanged prefix');
+    assert.ok(!requests[1].includes('MAIN_ROUND_2'), 'No automatic update while autosnap is off');
+    assert.equal((requests[1].match(/<main-session-snapshot /g) ?? []).length, 1);
 
-    // Same leaf, but the main session started working: the next question is not answered from a stale idle snapshot.
+    // /btw:sync: the progress is appended once, before the next question.
+    await commands.get('btw:sync').handler('', ctx);
+    await commands.get('btw').handler('Q3', ctx);
+    assert.ok(requests[2].startsWith(requests[1].slice(0, -1)), 'Sync appends, never rewrites');
+    const update = requests[2].slice(requests[1].length);
+    assert.ok(update.includes('<main-session-update ') && update.includes('MAIN_ROUND_2') && update.includes('MAIN_ROUND_2_ANSWER'));
+    assert.ok(update.indexOf('<main-session-update ') < update.indexOf('Q3'), 'Update comes before the question');
+    await commands.get('btw').handler('Q4', ctx);
+    assert.equal((requests[3].match(/<main-session-update /g) ?? []).length, 1, 'Nothing new: no second update');
+    const userQ3 = JSON.parse(requests[2]).filter(m => m.role === 'user').pop().content.map(c => c.text).join('');
+    assert.equal(displayBtwPrompt(userQ3), '↻ main session synced\nQ3', 'Pane shows a one-line marker');
+
+    // Autosnap on: updates are appended before each question; saved in btw.json.
+    await commands.get('btw:autosnap').handler('on', ctx);
+    assert.equal(JSON.parse(await fs.readFile(path.join(agentDir, 'btw.json'), 'utf8')).snapshot.auto, true);
+    addMain('user', 'MAIN_ROUND_3');
     mainIdle = false;
-    await commands.get('btw').handler('RUNNING_BTW_QUESTION', ctx);
-    assert.ok(requests[2].includes('main-status=\\"running\\"') && requests[2].includes('MAIN_AFTER_ANSWER'), 'Running state is fresh');
+    await commands.get('btw').handler('Q5', ctx);
+    const auto = requests[4].slice(requests[3].length);
+    assert.ok(auto.includes('MAIN_ROUND_3') && auto.includes('main-status=\\"running\\"'), 'Autosnap update with running status');
     mainIdle = true;
+    await commands.get('btw:autosnap').handler('off', ctx);
 
+    // The model pulls the update itself with main_session_update.
+    addMain('assistant', 'MAIN_ROUND_3_ANSWER');
+    callUpdateTool = true;
+    await commands.get('btw').handler('Q6', ctx);
+    callUpdateTool = false;
+    const toolRound = requests[requests.length - 1];
+    assert.ok(toolRound.includes('main_session_update') && toolRound.includes('MAIN_ROUND_3_ANSWER'), 'Tool result carries the new progress');
+    const afterTool = requests.length;
+
+    // Branch switch: an update cannot be appended, so the next question restarts with earlier exchanges.
+    addMain('user', 'MAIN_OTHER_BRANCH', 'main-1');
+    await commands.get('btw').handler('Q7', ctx);
+    const restarted = requests[afterTool];
+    assert.ok(restarted.includes('<btw-earlier-discussion') && restarted.includes('Q1') && restarted.includes('Q6'), 'Earlier exchanges kept');
+    assert.ok(restarted.includes('MAIN_OTHER_BRANCH') && !restarted.includes('MAIN_ROUND_3_ANSWER'), 'Fresh snapshot of the new branch');
+    assert.ok(restarted.indexOf('<main-session-snapshot ') < restarted.indexOf('<btw-earlier-discussion'), 'Snapshot first, then earlier discussion');
 
     await commands.get('btw:inject').handler('', ctx);
     assert.equal(handoffs.length, 1);
-    for (const kept of ['OLD_BTW_QUESTION', 'OLD_ANSWER_1', 'NEW_BTW_QUESTION', 'OLD_ANSWER_2']) assert.ok(handoffs[0].message.content.includes(kept), kept);
+    for (const kept of ['Q1', 'ANSWER_1', 'Q7']) assert.ok(handoffs[0].message.content.includes(kept), kept);
+    assert.ok(!handoffs[0].message.content.includes('<main-session-update'), 'Handoff carries questions, not updates');
 
-    // A tangent gets no main-session snapshot.
+    // A tangent gets no main-session context and no update tool.
     await commands.get('btw:tangent').handler('TANGENT_QUESTION', ctx);
-    assert.ok(requests[3].includes('TANGENT_QUESTION') && !requests[3].includes('<main-session-snapshot ') && !requests[3].includes('MAIN_AFTER_ANSWER'));
+    const tangent = requests[requests.length - 1];
+    assert.ok(tangent.includes('TANGENT_QUESTION') && !tangent.includes('<main-session-snapshot ') && !tangent.includes('MAIN_ROUND'));
     await commands.get('btw').handler('BACK_TO_CONTEXT', ctx);
-    assert.ok(requests[4].includes('<main-session-snapshot '), 'Contextual BTW gets the snapshot again');
-    assert.equal(mainEntries.length, 4, 'BTW never writes to the main session');
+    assert.ok(requests[requests.length - 1].includes('<main-session-snapshot '), 'Contextual BTW gets the snapshot again');
+    assert.ok(mainEntries.every(e => e.type === 'message'), 'BTW never writes to the main session');
     assert.ok(!notices.some(n => n.level === 'error'), JSON.stringify(notices));
   } finally {
     await events.get('session_shutdown')({}, ctx);
