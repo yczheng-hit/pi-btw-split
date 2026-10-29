@@ -47,7 +47,9 @@ export class OwnedPane {
       const reference = (await this.api('pane.current', { caller_pane_id: this.parentPaneId })).pane;
       pane = panes.find(p => p.terminal_id === reference?.terminal_id);
     }
-    if (!pane || pane.agent !== 'pi' || pane.agent_session?.value !== this.sessionFile) throw new Error('Main Pi pane/session identity changed');
+    if (!pane || pane.agent !== 'pi') throw new Error('Main Pi pane/session identity changed: parent pane is missing or no longer Pi');
+    if (!pane.agent_session?.value) throw new Error(`Herdr has not reported this Pi session for pane ${pane.pane_id}; when Pi is idle, run /reload then /btw in this Pi. If it persists, check herdr integration status on this machine`);
+    if (pane.agent_session.value !== this.sessionFile) throw new Error('Main Pi pane/session identity changed: session mismatch; run /session in this Pi and compare with herdr pane get on this machine');
     this.parentTerminal = pane.terminal_id; this.parentPaneId = pane.pane_id; return pane;
   }
   async current() {

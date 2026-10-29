@@ -2878,6 +2878,12 @@ export default function (pi: ExtensionAPI) {
     }
     const runtime: OverlayRuntime = {};
     overlayRuntime = runtime;
+    let errorReported = false;
+    const reportError = (error: unknown) => {
+      if (errorReported) return;
+      errorReported = true;
+      notify(ctx, `Native BTW failed: ${error instanceof Error ? error.message : String(error)}. No internal fallback was opened.`, "error");
+    };
     runtime.close = () => {
       runtime.closed = true;
       if (runtime.native) void runtime.native.close();
@@ -2910,7 +2916,7 @@ export default function (pi: ExtensionAPI) {
           if (overlayRuntime === runtime) overlayRuntime = null;
           if (activeBtwSession) clearBtwSessionSubscriptions(activeBtwSession);
         },
-        onError: (error) => notify(ctx, `Native BTW failed: ${error.message}. No internal fallback was opened.`, "error"),
+        onError: reportError,
       });
       nativeSurfaces.add(surface);
       void surface.done.finally(() => nativeSurfaces.delete(surface));
@@ -2927,7 +2933,7 @@ export default function (pi: ExtensionAPI) {
     catch (error) {
       runtime.close?.();
       // Do not silently reintroduce the single-PTY split on launch failure.
-      notify(ctx, `Could not open native BTW: ${error instanceof Error ? error.message : String(error)}`, "error");
+      reportError(error);
     }
   }
 

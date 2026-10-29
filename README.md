@@ -129,6 +129,12 @@ Inside the BTW composer, short forms work (`/ask`, `/new`, `/summ`), Tab complet
 - If a single question still overflows the model window after Pi's compaction, BTW reports the error and suggests `/btw:summarize` or `/btw:new`.
 - In-Pi split mode needs fullscreen at ≥120 columns and ≥14 rows; smaller terminals get a centered window.
 
+## Native identity troubleshooting
+
+If BTW says **“Herdr has not reported this Pi session”**, the parent pane exists but its official session identity is missing. When that Pi is idle, run `/reload`, then `/btw` in its main editor. No history deletion or Herdr restart is needed. In SSH/remote windows, check `herdr integration status` **on the remote machine**; fixing the local installation does not fix the remote one.
+
+A **session mismatch** is different: run `/session` in the affected Pi and compare its path with `herdr pane get <pane-id>` on the same machine. BTW never invents or overwrites the parent's identity, targets another Pi by its cwd, or silently opens the internal fallback.
+
 ## Configuration
 
 | Setting | Effect |

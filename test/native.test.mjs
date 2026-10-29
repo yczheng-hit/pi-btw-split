@@ -81,6 +81,20 @@ test('owned pane accepts a registered plugin root reached through a symlink', as
   assert.equal(f.opens, 1);
 });
 
+test('missing official parent identity gives idle reload guidance without claiming session replacement', async () => {
+  const f = fixture(); delete f.panes[0].agent_session;
+  const pane = new OwnedPane({ api: f.api, pluginRoot: '/own/plugin', parentPaneId: parent.pane_id, sessionFile: 'session-file', nonce: 'missing-session' });
+  await assert.rejects(pane.open({}), error => {
+    assert.match(error.message, /Herdr has not reported this Pi session/);
+    assert.match(error.message, /w1:p1/);
+    assert.match(error.message, /idle.*\/reload.*\/btw/);
+    assert.doesNotMatch(error.message, /identity changed/);
+    return true;
+  });
+  assert.equal(f.opens, 0);
+  assert.ok(f.calls.every(c => !c.method.startsWith('pane.report')), 'Never fabricate parent identity');
+});
+
 test('only the new two-leaf sibling split is eligible for 60/40', () => {
   const leaf = id => ({ type: 'pane', pane_id: id });
   const root = { type: 'split', direction: 'down', first: leaf('other'), second: { type: 'split', direction: 'right', first: leaf('main'), second: leaf('btw') } };
@@ -277,6 +291,12 @@ test('real extension uses a separate authenticated surface; reuse, draft, shortc
     assert.equal(f.panes.length, 1); assert.equal(f.panes[0].agent, 'pi');
     assert.ok(f.calls.filter(c => c.method.startsWith('pane.report')).every(c => c.params.pane_id !== parent.pane_id));
     assert.ok(!notices.some(n => /failed|could not|error/i.test(n)), JSON.stringify(notices));
+    notices.length = 0; delete f.panes[0].agent_session;
+    await commands.get('btw').handler('', ctx);
+    assert.equal(notices.filter(n => /Could not open native BTW|Native BTW failed/.test(n)).length, 1, JSON.stringify(notices));
+    assert.match(notices[0], /Herdr has not reported this Pi session/);
+    assert.equal(f.panes.length, 1, 'Missing parent identity never opens a fallback or child pane');
+    await events.get('session_shutdown')({}, ctx);
   } finally {
     await events.get('session_shutdown')({}, ctx); client?.destroy(); await new Promise(resolve => rpc.close(resolve)); await fs.rm(directory, { recursive: true, force: true });
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }

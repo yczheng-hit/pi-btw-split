@@ -129,6 +129,12 @@ pi install git:github.com/yczheng-hit/pi-btw-split   # 或：pi install /absolut
 - 如果压缩后 BTW 线程仍超出模型上下文窗口，BTW 会报错，并提示使用 `/btw:summarize` 或 `/btw:new`。
 - Pi 内部分屏需要全屏模式且终端至少 120 列、14 行；更小的终端使用居中窗口。
 
+## 原生 pane 身份错误排查
+
+如果 BTW 提示 **“Herdr has not reported this Pi session”**，说明父 pane 存在，但缺少官方会话身份记录。等该 Pi 空闲后，在它的主输入框依次执行 `/reload`、`/btw`。无需删除历史或重启 Herdr。SSH / 远程窗口要在**远程机器**检查 `herdr integration status`；修复本机安装不会修复远程环境。
+
+**session mismatch** 则表示记录与当前会话不符：在报错的 Pi 执行 `/session`，对照同一台机器上的 `herdr pane get <pane-id>` 中的路径。BTW 不会伪造或覆盖父会话身份、按工作目录误选其他 Pi，也不会静默退回内部分屏。
+
 ## 配置
 
 | 设置 | 作用 |

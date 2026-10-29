@@ -3,6 +3,15 @@
 Independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Maintenance, updates and support belong to this project; related-project links in the READMEs are comparisons and credits, not support destinations.
 Dated validations and measurements below are historical results from the configurations described, not current test counts, performance promises, or guarantees for other hosts. Current setup and development commands are in [README.md](README.md).
 
+## Missing parent identity diagnostics (2026-10-29)
+
+A remote Herdr 0.9.3 / Pi 1.4.0 pane was detected as Pi but had no `agent_session` record; the inherited pane ID/socket were correct. Read-only reproduction hit the same generic “identity changed” error. The reason its official integration missed the identity is not yet established; idle `/reload` recovery awaits user validation.
+
+- Distinguish missing official session identity from a missing/non-Pi parent or an actual session mismatch, with same-machine/remote-aware recovery guidance.
+- Report a failed native launch once, not once via `NativeSurface.onError` and again via the command catch. No fallback or parent-identity writes were added; all ownership checks remain.
+- Regression tests first failed on the missing-identity message and duplicate notifications. A real Pi 1.4.0 / stock Herdr 0.9.1 isolated lifecycle probe passes startup, `/new`, and `/reload` without waiting for native identity before opening BTW. This does not prove recovery of the affected remote pane.
+- Validation after the diagnostic change: `npm test` 39/39 and strict typecheck on pinned Pi 1.2.0; native tests 10/10 on installed Pi 1.4.0; isolated stock Herdr 0.9.1 startup/new/reload each reach a real native frontend frame.
+
 ## Native Herdr pane — current default on Linux and macOS
 
 In `HERDR_ENV=1`, `/btw` and `/side` open/reuse a native right-hand Herdr pane.
