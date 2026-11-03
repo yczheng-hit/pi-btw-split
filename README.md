@@ -75,6 +75,8 @@ Run each step and check its result before the next one. Ask the user before remo
 
 **Update:** `pi update git:github.com/yczheng-hit/pi-btw-split`, then `/reload`. For a local install, update your checkout from this project's own history, then `/reload`. To pin a version, install `git:github.com/yczheng-hit/pi-btw-split@<commit-or-tag>`.
 
+**Local checkouts:** after updating, install declared runtime dependencies (`npm install --omit=dev --ignore-scripts --legacy-peer-deps`) before activation. The native backend now uses the package's explicit `jiti` dependency to reload its complete local `.mjs` graph, rather than relying on Node's persistent ESM cache. If an already stale runtime does not pick up the first repair, restart that Pi yourself when idle; repeated reload is not a guarantee of official Herdr identity recovery. Do not clear all caches or modify the managed integration as a workaround.
+
 ## Manual install
 
 ```sh

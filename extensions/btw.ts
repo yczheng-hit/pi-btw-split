@@ -62,7 +62,8 @@ import {
   useFullMainContext,
 } from "./btw-context";
 import { getBtwUiResources, showBtwOverlay } from "./btw-persistent-overlay";
-import { NativeSurface } from "../native/surface.mjs";
+import type { NativeSurface } from "../native/surface.mjs";
+import { loadNativeBackend } from "./btw-native-backend";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -2038,6 +2039,7 @@ class BtwOverlayComponent extends Container implements Focusable {
 }
 
 export default function (pi: ExtensionAPI) {
+  const { NativeSurface } = loadNativeBackend();
   let pendingThread: BtwDetails[] = [];
   let pendingMode: BtwThreadMode = "contextual";
   let btwModelOverride: SessionModel | null = null;

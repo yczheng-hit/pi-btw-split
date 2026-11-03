@@ -3,6 +3,18 @@
 Independently maintained in [yczheng-hit/pi-btw-split](https://github.com/yczheng-hit/pi-btw-split), based on Dan Bachelder's MIT-licensed pi-btw 0.7.1. Maintenance, updates and support belong to this project; related-project links in the READMEs are comparisons and credits, not support destinations.
 Dated validations and measurements below are historical results from the configurations described, not current test counts, performance promises, or guarantees for other hosts. Current setup and development commands are in [README.md](README.md).
 
+## Reload native backend graph (local repair; not deployed)
+
+Pi 1.2.0 and 1.4.0 invalidate the extension factory on reload, but Jiti's async native `.mjs` imports stay in Node's ESM URL cache. A source-edit regression against the real BTW entry reproduced `entry=2, surface=1, herdr=1, protocol=1`. This is a proven local reload defect, **not** a proven explanation for the remote official-identity omission or old `.ts` double notification.
+
+- `extensions/btw-native-backend.ts` creates a fresh synchronous Jiti scope per extension factory for `surface.mjs -> herdr.mjs -> protocol.mjs`. Both module and filesystem caches are disabled for this small SDK-free graph. No host patch, outer-query-only trick, global cache clearing or duplicated Pi SDK import is used.
+- `jiti@2.7.0` is an explicit runtime dependency, not an undeclared dependency borrowed from the host. The existing SDK-free frontend still loads the same `.mjs` sources in its new Node process.
+- The backend's exit cleanup listener is removed once its last IPC directory closes, so refreshed generations do not accumulate process listeners.
+- Strict parent/session/terminal and child nonce ownership checks, missing-vs-mismatched identity diagnostics, and one launch-error notification remain. No parent identity is written and no internal fallback is opened.
+- `test/reload.test.mjs` edits temporary copies of all four source layers across four real-loader reloads and checks versions, private-directory cleanup and listener count. `test/live-reload.mjs` is opt-in and refuses anything except a private `/tmp/btw-pidtest-*` XDG `pidtest` socket; it exercises real bundled Pi TUI `/reload`, official identity, old child cleanup and actual frontend frames. `BTW_RELOAD_LEGACY=1` reinstates the old import in the temporary fixture for a red control.
+
+Local regression so far: **40/40** on pinned Pi 1.2.0 and installed Pi 1.4.0; strict typecheck (Pi 1.2.0) and package file dry-run passed. This change has not been committed, pushed or deployed by this repair. For a local checkout, install declared runtime dependencies before activation. A currently stale extension may need a user-controlled restart to pick up the first repair; subsequent native-source reloads are what these tests cover. Missing official identity is a separate external integration condition, not automatically repaired here.
+
 ## Missing parent identity diagnostics (2026-10-29)
 
 A remote Herdr 0.9.3 / Pi 1.4.0 pane was detected as Pi but had no `agent_session` record; the inherited pane ID/socket were correct. Read-only reproduction hit the same generic “identity changed” error. The reason its official integration missed the identity is not yet established; idle `/reload` recovery awaits user validation.

@@ -75,6 +75,8 @@ agent 会检查前置条件、安装扩展、在适用时注册 Herdr pane 插�
 
 **更新：** `pi update git:github.com/yczheng-hit/pi-btw-split`，然后 `/reload`。本地安装从本项目自身历史更新 checkout，然后 `/reload`。要固定版本，安装 `git:github.com/yczheng-hit/pi-btw-split@<commit 或 tag>`。
 
+**本地 checkout：** 更新后先安装声明的运行依赖（`npm install --omit=dev --ignore-scripts --legacy-peer-deps`），再激活。native 后端现在使用本包显式声明的 `jiti` 刷新完整的本地 `.mjs` 依赖图，不再依赖 Node 永久保留的 ESM 缓存。如果已陈旧的运行时第一次仍没有加载修复，请由用户在空闲时重启该 Pi；反复 reload 不保证恢复 Herdr 官方身份。不要把清空全部缓存或修改 managed integration 当作修复。
+
 ## 手动安装
 
 ```sh

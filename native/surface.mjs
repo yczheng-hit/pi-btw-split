@@ -9,12 +9,19 @@ import { VERSION, MAX_INPUT_BYTES, createDecoder, createSender, dimensions, vali
 
 // Remove our private IPC directories if Pi exits without running session_shutdown.
 const liveDirectories = new Set();
-let exitHookInstalled = false;
+let exitHook;
 function trackDirectory(directory) {
   liveDirectories.add(directory);
-  if (exitHookInstalled) return;
-  exitHookInstalled = true;
-  process.once('exit', () => { for (const dir of liveDirectories) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } });
+  if (exitHook) return;
+  exitHook = () => { for (const dir of liveDirectories) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } };
+  process.once('exit', exitHook);
+}
+function untrackDirectory(directory) {
+  liveDirectories.delete(directory);
+  if (liveDirectories.size === 0 && exitHook) {
+    process.removeListener('exit', exitHook);
+    exitHook = undefined;
+  }
 }
 
 // Unix socket paths are limited to 104 bytes on macOS (108 on Linux). macOS TMPDIR is
@@ -171,7 +178,10 @@ export class NativeSurface {
       await this.pane.close().catch(() => {});
       await new Promise(resolve => this.server ? this.server.close(resolve) : resolve());
       try { this.component?.dispose?.(); } catch { /* still remove the capability directory */ }
-      if (this.directory) { await fs.rm(this.directory, { recursive: true, force: true }); liveDirectories.delete(this.directory); }
+      if (this.directory) {
+        try { await fs.rm(this.directory, { recursive: true, force: true }); }
+        finally { untrackDirectory(this.directory); }
+      }
     })().finally(() => this.resolveClosed());
     return this.closing;
   }
